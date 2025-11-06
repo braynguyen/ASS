@@ -29,7 +29,7 @@ NUM_CONTAINERS=${1:-3}
 # docker-compose.yml uses 'build: .' (builds a custom image from your Dockerfile):
 # docker compose up --scale relay-node=$NUM_CONTAINERS --build
 
-gcc -o relay.c relay
+gcc -o relay relay.c
 
 # docker-compose.yml uses 'image: gcc:latest' (compiles in the container at runtime):
 docker compose up --scale relay-node=$NUM_CONTAINERS

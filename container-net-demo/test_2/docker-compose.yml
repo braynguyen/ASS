@@ -32,7 +32,7 @@ services:
     # Set the working directory inside the container
     working_dir: /app
     # Tell the container what to run (compile, execute, and clean up)
-    command: bash -c "gcc -pthread -o relay relay.c && ./relay"
+    command: bash -c "./relay"
     # --- Same as before ---
     environment:
       - SERVICE_NAME=relay-node
