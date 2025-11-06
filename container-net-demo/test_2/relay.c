@@ -200,29 +200,27 @@ int main() {
     }
 
     // Small delay to ensure listener thread is ready
-    sleep(1);
+    printf("Waiting 10 seconds for other peers to listen...\n");
+    fflush(stdout); // Flush output so Docker Compose logs it immediately
+    sleep(10);
 
     // 7. Now send messages to all peers
     printf("Sending messages to peers...\n");
     fflush(stdout);
     sendMessageToPeers(sockfd, addrinfo_list, self_ip);
 
-    // 8. Wait for listener thread to finish receiving all messages
-    printf("Waiting for listener thread to complete...\n");
-    fflush(stdout);
-    pthread_join(listener, NULL);
 
     printf("---------------------------\n");
     fflush(stdout);
 
-    // 9. Free the memory used by the list
+    // 8. Free the memory used by the list
     freeaddrinfo(addrinfo_list);
 
-    // 10. Keep the container running so we can see it in "docker ps"
+    // 9. Keep the container running so we can see it in "docker ps"
     // and so other containers can discover it.
     printf("Idling...\n");
     fflush(stdout);
-    sleep(60); // Sleep for 1 minute (adjust as needed)
+    sleep(10); // Sleep for 1 minute (adjust as needed)
 
     return 0;
 }
