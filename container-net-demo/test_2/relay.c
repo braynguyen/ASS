@@ -66,7 +66,7 @@ char* getCurrentTime() {
     return buffer;
 }
 
-int sendMessageToPeers(int sockfd, struct addrinfo *addrinfo_list, char* self_ip) {
+void sendMessageToPeers(int sockfd, struct addrinfo *addrinfo_list, char* self_ip) {
     struct addrinfo *addrinfo_iter;
     int numPeers = 0;
     for (addrinfo_iter = addrinfo_list; addrinfo_iter != NULL; addrinfo_iter = addrinfo_iter->ai_next)
@@ -95,10 +95,8 @@ int sendMessageToPeers(int sockfd, struct addrinfo *addrinfo_list, char* self_ip
             fflush(stdout);
 
             free(time); // Clean up
-            numPeers++;
         }
     }
-    return numPeers;
 }
 
 void receiveMessageFromPeers(int sockfd) {
