@@ -8,6 +8,7 @@
 #include <sys/socket.h> // For AF_INET
 #include <time.h>       // For time, localtime
 #include <pthread.h>    // For pthread_create, pthread_join
+#include <sys/time.h>   // For gettimeofday
 
 // Helper function to get this container's own IP address
 // Returns 0 on success, -1 on failure
@@ -45,17 +46,25 @@ int get_self_ip(char *ip_buffer, size_t buffer_size) {
 }
 
 char* getCurrentTime() {
-    time_t now = time(NULL);
-    struct tm *tm_info = localtime(&now);
-    char *buffer = malloc(26);
+    struct timeval tv;
+    gettimeofday(&tv, NULL);  // Get current time (seconds + microseconds)
+
+    struct tm *tm_info = localtime(&tv.tv_sec);
+
+    char *buffer = malloc(32);
     if (!buffer) {
         fprintf(stderr, "Error: Could not allocate time string.\n");
         exit(1);
     }
-    strftime(buffer, 26, "%Y-%m-%d %H:%M:%S", tm_info);
-    return (char *) buffer;
-}
 
+    // Format base time
+    strftime(buffer, 20, "%Y-%m-%d %H:%M:%S", tm_info);
+
+    // Append microseconds (6 digits)
+    sprintf(buffer + 19, ".%06ld", tv.tv_usec);
+
+    return buffer;
+}
 
 int sendMessageToPeers(int sockfd, struct addrinfo *addrinfo_list, char* self_ip) {
     struct addrinfo *addrinfo_iter;
@@ -79,7 +88,7 @@ int sendMessageToPeers(int sockfd, struct addrinfo *addrinfo_list, char* self_ip
 
             char message[100];
             char *time = getCurrentTime();
-            sprintf(message, "Hello from %s: %s\n", self_ip, time);
+            sprintf(message, "Hello from %s: %s", self_ip, time);
             sendto(sockfd, message, strlen(message), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
 
             printf("Sent message to %s.\n", peer_ip);
@@ -92,16 +101,17 @@ int sendMessageToPeers(int sockfd, struct addrinfo *addrinfo_list, char* self_ip
     return numPeers;
 }
 
-void receiveMessageFromPeers(int sockfd, int num_peers) {
+void receiveMessageFromPeers(int sockfd) {
     char buffer[1024];
     struct sockaddr_in sender_addr;
     socklen_t addr_len = sizeof(sender_addr);
 
-    printf("Listening for %d messages...\n", num_peers);
+    printf("Listening for messages...\n");
     fflush(stdout);
 
     // Receive messages from each peer
-    for (int i = 0; i < num_peers; i++) {
+    while (1) {
+        char buffer[1024];
         int bytes_received = recvfrom(sockfd, buffer, sizeof(buffer) - 1, 0,
                                       (struct sockaddr*)&sender_addr, &addr_len);
 
@@ -112,7 +122,8 @@ void receiveMessageFromPeers(int sockfd, int num_peers) {
             char sender_ip[INET_ADDRSTRLEN];
             inet_ntop(AF_INET, &(sender_addr.sin_addr), sender_ip, sizeof(sender_ip));
 
-            printf("Received from %s: %s", sender_ip, buffer);
+            char* time = getCurrentTime();
+            printf("Received from %s: \"%s\" at time %s\n", sender_ip, buffer, time);
             fflush(stdout);
         }
     }
@@ -127,7 +138,7 @@ typedef struct {
 // Thread function that listens for messages
 void* listener_thread(void* arg) {
     listener_args_t* args = (listener_args_t*)arg;
-    receiveMessageFromPeers(args->sockfd, args->num_peers);
+    receiveMessageFromPeers(args->sockfd);
     return NULL;
 }
 
@@ -182,24 +193,9 @@ int main() {
         exit(1);
     }
 
-    // 6. Count peers first
-    int numPeers = 0;
-    struct addrinfo *temp;
-    for (temp = addrinfo_list; temp != NULL; temp = temp->ai_next) {
-        struct sockaddr_in *sa = (struct sockaddr_in *)temp->ai_addr;
-        char peer_ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &(sa->sin_addr), peer_ip, sizeof(peer_ip));
-        if (strcmp(self_ip, peer_ip) != 0) {
-            numPeers++;
-        }
-    }
-
-    printf("Found %d peers. Starting listener thread...\n", numPeers);
-    fflush(stdout);
-
-    // 7. Start listener thread FIRST (before sending)
+    // 6. Start listener thread FIRST (before sending)
     pthread_t listener;
-    listener_args_t args = {sockfd, numPeers};
+    listener_args_t args = {sockfd};
     if (pthread_create(&listener, NULL, listener_thread, &args) != 0) {
         fprintf(stderr, "Failed to create listener thread.\n");
         exit(1);
@@ -208,12 +204,12 @@ int main() {
     // Small delay to ensure listener thread is ready
     sleep(1);
 
-    // 8. Now send messages to all peers
+    // 7. Now send messages to all peers
     printf("Sending messages to peers...\n");
     fflush(stdout);
     sendMessageToPeers(sockfd, addrinfo_list, self_ip);
 
-    // 9. Wait for listener thread to finish receiving all messages
+    // 8. Wait for listener thread to finish receiving all messages
     printf("Waiting for listener thread to complete...\n");
     fflush(stdout);
     pthread_join(listener, NULL);
@@ -221,10 +217,10 @@ int main() {
     printf("---------------------------\n");
     fflush(stdout);
 
-    // 10. Free the memory used by the list
+    // 9. Free the memory used by the list
     freeaddrinfo(addrinfo_list);
 
-    // 11. Keep the container running so we can see it in "docker ps"
+    // 10. Keep the container running so we can see it in "docker ps"
     // and so other containers can discover it.
     printf("Idling...\n");
     fflush(stdout);
