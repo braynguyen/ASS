@@ -5,10 +5,7 @@ FROM gcc:latest
 WORKDIR /app
 
 # Copy our C code into the container's /app directory
-COPY relay.c .
-
-# Compile the C code and create an executable named "relay"
-RUN gcc -o relay relay.c
+COPY relay .
 
 # Set the default command to run when the container starts
 CMD ["./relay"]
