@@ -1,0 +1,40 @@
+#!/bin/bash
+# generate-compose.sh
+# Generates docker-compose.yml with N relay-node services, each with a static IP
+# Usage: ./generate-compose.sh [num_containers]
+
+NUM_CONTAINERS=${1:-3}
+
+cat > docker-compose.yml << 'YAML_START'
+services:
+YAML_START
+
+# Generate a service for each container
+for i in $(seq 1 $NUM_CONTAINERS); do
+  IP="172.20.0.$((i+1))"
+  cat >> docker-compose.yml << YAML_SERVICE
+  relay-node-$i:
+    build: .
+    container_name: relay-node-$i
+    environment:
+      - SERVICE_NAME=relay-node
+    networks:
+      mesh-net:
+        ipv4_address: $IP
+        aliases:
+          - relay-node
+
+YAML_SERVICE
+done
+
+# Add network definition
+cat >> docker-compose.yml << 'YAML_END'
+networks:
+  mesh-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+YAML_END
+
+echo "Generated docker-compose.yml with $NUM_CONTAINERS containers (IPs: 172.20.0.2 - 172.20.0.$((NUM_CONTAINERS+1)))"
