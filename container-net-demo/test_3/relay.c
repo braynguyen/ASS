@@ -96,17 +96,24 @@ int compare_peer_info(const void *a, const void *b) {
 }
 
 peer_info_t* build_peer_map(struct addrinfo *addrinfo_list, int *peer_count) {
+
+    // build a peer list with initial capacity of 4
     int capacity = 4;
     peer_info_t *peers = malloc(capacity * sizeof(peer_info_t));
     if (!peers) {
         perror("malloc");
         exit(1);
     }
+
     int count = 0;
     struct addrinfo *addrinfo_iter;
     for (addrinfo_iter = addrinfo_list; addrinfo_iter != NULL; addrinfo_iter = addrinfo_iter->ai_next) {
+        
+        // extract ip address
         struct sockaddr_in *sa = (struct sockaddr_in *)addrinfo_iter->ai_addr;
         uint32_t host_addr = ntohl(sa->sin_addr.s_addr);
+
+        // avoid duplicate peers
         int exists = 0;
         for (int i = 0; i < count; ++i) {
             if (peers[i].addr_host_order == host_addr) {
@@ -117,6 +124,8 @@ peer_info_t* build_peer_map(struct addrinfo *addrinfo_list, int *peer_count) {
         if (exists) {
             continue;
         }
+
+        // resize peers array if capacity is reached
         if (count == capacity) {
             capacity *= 2;
             peer_info_t *tmp = realloc(peers, capacity * sizeof(peer_info_t));
@@ -127,17 +136,23 @@ peer_info_t* build_peer_map(struct addrinfo *addrinfo_list, int *peer_count) {
             }
             peers = tmp;
         }
+
+        // add peer to peers array
         peers[count].addr_host_order = host_addr;
         peers[count].addr_network_order = htonl(host_addr);
         inet_ntop(AF_INET, &(sa->sin_addr), peers[count].ip, sizeof(peers[count].ip));
         peers[count].node_number = 0; // Filled in after sorting
         count++;
     }
+
+    // no peers
     if (count == 0) {
         free(peers);
         *peer_count = 0;
         return NULL;
     }
+
+    // sort by ip addresss so every node has the same ordering
     qsort(peers, count, sizeof(peer_info_t), compare_peer_info);
     for (int i = 0; i < count; ++i) {
         peers[i].node_number = i + 1;
