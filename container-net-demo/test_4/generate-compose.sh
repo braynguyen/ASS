@@ -5,11 +5,13 @@
 
 NUM_CONTAINERS=${1:-3}
 
+# Places generated document into docker-compose.yml using heredoc
 cat > docker-compose.yml << 'YAML_START'
 services:
 YAML_START
 
 # Generate a service for each container
+# Start at 2 since 172.20.0.1 is reserved for docker bridge gateway
 for i in $(seq 1 $NUM_CONTAINERS); do
   IP="172.20.0.$((i+1))"
   cat >> docker-compose.yml << YAML_SERVICE
@@ -34,7 +36,7 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.20.0.0/16
+        - subnet: 172.20.0.0/16 # 16 bits of address space to work with
 YAML_END
 
 echo "Generated docker-compose.yml with $NUM_CONTAINERS containers (IPs: 172.20.0.2 - 172.20.0.$((NUM_CONTAINERS+1)))"
