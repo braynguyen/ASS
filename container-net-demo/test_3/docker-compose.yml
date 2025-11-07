@@ -1,0 +1,47 @@
+# 'version' is obsolete in Compose V2 (docker compose) and can be omitted
+
+# ---------------------------------------------------------------
+# Use the Dockerfile in the current directory to build the image
+# ---------------------------------------------------------------
+services:
+  # This is the name of our service
+  relay-node:
+    # Build the image from the Dockerfile in the current directory
+    build: .
+    # Pass the service name *into* the container as an environment variable
+    environment:
+      - SERVICE_NAME=relay-node
+    # Attach this service to our custom network
+    networks:
+      - mesh-net
+# ---------------------------------------------------------------
+
+
+# ---------------------------------------------------------------
+# Use the gcc:latest image and compile at runtime
+# ---------------------------------------------------------------
+# services:
+#   relay-node:
+#     # Use the gcc:latest image instead of building
+#     image: gcc:latest
+#     # Add the 'init' flag to fix the Ctrl+C (PID 1) problem
+#     init: true
+#     # Mount the current directory into /app
+#     volumes:
+#       - "./:/app"
+#     # Set the working directory inside the container
+#     working_dir: /app
+#     # Tell the container what to run (compile, execute, and clean up)
+#     command: bash -c "./relay"
+#     # --- Same as before ---
+#     environment:
+#       - SERVICE_NAME=relay-node
+#     networks:
+#       - mesh-net
+# ---------------------------------------------------------------
+
+
+# Define the custom network (not strictly necessary, but gives the default network a name)
+networks:
+  mesh-net:
+    driver: bridge
