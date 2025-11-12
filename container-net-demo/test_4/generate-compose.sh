@@ -12,8 +12,8 @@ YAML_START
 
 # Generate a service for each container
 # Start at 2 since 172.20.0.1 is reserved for docker bridge gateway
-for i in $(seq 1 $NUM_CONTAINERS); do
-  IP="172.20.0.$((i+1))"
+for i in $(seq 0 $((NUM_CONTAINERS-1))); do
+  IP="172.20.0.$((i+2))"
   cat >> docker-compose.yml << YAML_SERVICE
   relay-node-$i:
     build: .

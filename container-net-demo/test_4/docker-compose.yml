@@ -1,4 +1,15 @@
 services:
+  relay-node-0:
+    build: .
+    container_name: relay-node-0
+    environment:
+      - SERVICE_NAME=relay-node
+    networks:
+      mesh-net:
+        ipv4_address: 172.20.0.2
+        aliases:
+          - relay-node
+
   relay-node-1:
     build: .
     container_name: relay-node-1
@@ -6,7 +17,7 @@ services:
       - SERVICE_NAME=relay-node
     networks:
       mesh-net:
-        ipv4_address: 172.20.0.2
+        ipv4_address: 172.20.0.3
         aliases:
           - relay-node
 
@@ -17,7 +28,7 @@ services:
       - SERVICE_NAME=relay-node
     networks:
       mesh-net:
-        ipv4_address: 172.20.0.3
+        ipv4_address: 172.20.0.4
         aliases:
           - relay-node
 
@@ -28,24 +39,13 @@ services:
       - SERVICE_NAME=relay-node
     networks:
       mesh-net:
-        ipv4_address: 172.20.0.4
+        ipv4_address: 172.20.0.5
         aliases:
           - relay-node
 
   relay-node-4:
     build: .
     container_name: relay-node-4
-    environment:
-      - SERVICE_NAME=relay-node
-    networks:
-      mesh-net:
-        ipv4_address: 172.20.0.5
-        aliases:
-          - relay-node
-
-  relay-node-5:
-    build: .
-    container_name: relay-node-5
     environment:
       - SERVICE_NAME=relay-node
     networks:
@@ -59,4 +59,4 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.20.0.0/16
+        - subnet: 172.20.0.0/16 # 16 bits of address space to work with
