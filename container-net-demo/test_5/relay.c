@@ -19,7 +19,7 @@
 #define MAX_NODES 10 
 #define BUFFER_SIZE 1024
 #define LOG_FILENAME_FORMAT "/app/logs/node_%d.csv"
-#define SYNC_WINDOW_SECONDS 10      // Time (in sec) for each node's "turn"
+#define SYNC_WINDOW_SECONDS 5      // Time (in sec) for each node's "turn"
 #define SYNC_PREFIX "SYNC|"
 #define MSG_PREFIX  "MSG|"
 
@@ -60,7 +60,6 @@ void schedule_turn_timer(sync_state_t *state);
 void* listener_thread(void* arg);
 void broadcast_sync_packet(int sockfd, int self_index);
 void sendMessageToPeers(int sockfd, int self_index);
-void perform_send_window(int sockfd, int self_index);
 
 // =============================================================================
 // --- GENERAL HELPER FUNCTIONS ---
@@ -229,36 +228,28 @@ void* listener_thread(void* arg) {
     while (1) {
         int bytes_received = recvfrom(sockfd, recv_buffer, sizeof(recv_buffer) - 1, 0,
                                       (struct sockaddr*)&sender_addr, &addr_len);
-
         if (bytes_received < 0) {
             log_event("ERROR", "recvfrom() failed");
             continue;
         }
-        
         recv_buffer[bytes_received] = '\0'; // Null-terminate
 
-        // Get sender's info
+        // Get sender's info from sender_addr
         char sender_ip_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &(sender_addr.sin_addr), sender_ip_str, sizeof(sender_ip_str));
         int sender_index = get_node_index_for_addr(&sender_addr.sin_addr);
 
         char log_msg[BUFFER_SIZE];
+        snprintf(log_msg, sizeof(log_msg), "Received from Node %d (%s): \"%s\"",
+                                            sender_index, sender_ip_str, recv_buffer);
+        log_event("RECV", log_msg);
 
         if (strncmp(recv_buffer, SYNC_PREFIX, strlen(SYNC_PREFIX)) == 0) {
-            int sync_sender_index = atoi(recv_buffer + strlen(SYNC_PREFIX));
-            snprintf(log_msg, sizeof(log_msg), "Received SYNC from Node %d (%s)",
-                     sync_sender_index, sender_ip_str);
-            log_event("RECV", log_msg);
-
-            int next_node_index = get_next_node_index(sync_sender_index);
+            int next_node_index = get_next_node_index(sender_index);
             if (next_node_index == sync_state->self_index) {
                 schedule_turn_timer(sync_state);
             }
-        } else {
-             snprintf(log_msg, sizeof(log_msg), "Received from Node %d (%s): \"%s\"",
-                     sender_index, sender_ip_str, recv_buffer);
-             log_event("RECV", log_msg);
-        }
+        } 
     }
     return NULL;
 }
@@ -300,14 +291,6 @@ void sendMessageToPeers(int sockfd, int self_index) {
     }
 }
 
-/**
- * @brief The main action for a node's "turn": broadcast SYNC, then MSG.
- */
-void perform_send_window(int sockfd, int self_index) {
-    broadcast_sync_packet(sockfd, self_index);
-    sendMessageToPeers(sockfd, self_index);
-}
-
 // =============================================================================
 // --- MAIN EXECUTION ---
 // =============================================================================
@@ -333,9 +316,9 @@ int main() {
     inet_ntop(AF_INET, &self_in_addr, self_ip_str, sizeof(self_ip_str));
     
     printf("--- My IP: %s ---\n", self_ip_str);
-    printf("Waiting 5 seconds for other peers to start...\n");
+    printf("Waiting 2 seconds for other peers to start...\n");
     fflush(stdout);
-    sleep(5); 
+    sleep(2); 
 
     // 3. DNS Lookup
     struct addrinfo hints, *addrinfo_list, *addrinfo_iter;
@@ -432,15 +415,41 @@ int main() {
     }
     
     // Small delay to ensure all listeners are ready
-    log_event("SYNC", "Waiting 10s for all nodes to be ready...");
-    sleep(10);
-    
-    log_event("INIT", "Entering synchronized send loop.");
+    log_event("SYNC", "Waiting for all listeners to be ready...");
+    sleep(2);
 
     // 10. Main thread becomes the "Sender"
     while (1) {
         wait_for_turn(&sync_state);
-        perform_send_window(sockfd, self_index);
+
+        // Get the time our window starts
+        struct timeval start_time;
+        gettimeofday(&start_time, NULL);
+        double start_time_sec = (double)start_time.tv_sec + (double)start_time.tv_usec / 1e6;
+        
+        // Log entry into send window
+        log_event("SEND", "Entering send window.");
+        
+        // It's our turn, begin broadcast with SYNC
+        broadcast_sync_packet(sockfd, self_index);
+
+        // Continue sending MSGs until our window ends. This loop replaces perform_send_window()
+        for (double current_time_sec = start_time_sec; (current_time_sec - start_time_sec) < SYNC_WINDOW_SECONDS; ) {
+
+            // --- This is where you would stream data --------------
+            // For now, we'll just send one message and then sleep
+            // to simulate a non-blocking stream.
+            sendMessageToPeers(sockfd, self_index);
+            // Sleep for a short time to avoid flooding
+            // In a real app, this might be a complex streaming loop.
+            sleep(2); // Send every 2 seconds
+            // ------------------------------------------------------
+
+            // Update current time
+            struct timeval current_time;
+            gettimeofday(&current_time, NULL);
+            current_time_sec = (double)current_time.tv_sec + (double)current_time.tv_usec / 1e6;
+        }
     }
 
     return 0;
