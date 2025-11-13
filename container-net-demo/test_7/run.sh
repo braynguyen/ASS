@@ -8,7 +8,7 @@
 # ---------------------------------------------------------
 
 # Default number of containers
-DEFAULT_NODES=5
+DEFAULT_NODES=3
 
 # Simple help
 if [[ "$1" == "-h" || "$1" == "--help" ]]; then

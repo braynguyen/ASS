@@ -20,10 +20,8 @@
 #define BUFFER_SIZE 1024
 #define LOG_FILENAME_FORMAT "/app/logs/node_%d.csv"
 #define SYNC_WINDOW_SECONDS 5      // Time (in sec) for each node's "turn"
-#define SYNC_PREFIX "SYNC|"
-#define MSG_PREFIX  "MSG|"
-#define DST_PREFIX  "DST|"
-#define QUEUE_SIZE 10
+#define SYNC_PREFIX "SYNC|NODE:%d"
+#define MSG_PREFIX  "MSG|SRC:%d|DST:%d"
 
 // Hard-coded visibility matrix: visibility_matrix[i][j] = 1 means node i can see node j
 // node-0 can see node-1 and node-2
@@ -43,23 +41,11 @@ static const int visibility_matrix[MAX_NODES][MAX_NODES] = {
     {0, 0, 0, 0, 0}
 };
 
-typedef struct Node {
-    char data[1024];
-    struct Node* next;
-} Node;
-
-// Queue structure
-typedef struct Queue {
-    Node* front;
-    Node* rear;
-} Queue;
-
 // --- Globals ---
 FILE *log_file = NULL;
 struct sockaddr_in node_list[MAX_NODES]; // Holds all nodes (sorted)
 int node_count = 0;
 int self_index = -1; // Our unique, sorted ID (0 is "leader")
-Queue *buffers[MAX_NODES];
 
 /**
  * @brief Thread synchronization state for TDMA.
@@ -98,53 +84,6 @@ void sendMessageToPeers(int sockfd, int self_index);
 // =============================================================================
 // --- GENERAL HELPER FUNCTIONS ---
 // =============================================================================
-
-// Function to create an empty queue
-Queue* createQueue() {
-    Queue* q = (Queue*)malloc(sizeof(Queue));
-    q->front = NULL;
-    q->rear = NULL;
-    return q;
-}
-
-// Function to add an element to the queue (enqueue)
-void enqueue(Queue* q, char *value) {
-    Node* newNode = (Node*)malloc(sizeof(Node));
-    strncpy(newNode->data, value, BUFFER_SIZE-1);  // Copy up to 1023 chars
-    newNode->data[BUFFER_SIZE-1] = '\0';           // Ensure null termination
-    newNode->next = NULL;
-
-    if (q->rear == NULL) { // If queue is empty
-        q->front = newNode;
-        q->rear = newNode;
-    } else {
-        q->rear->next = newNode;
-        q->rear = newNode;
-    }
-}
-
-// Function to remove an element from the queue (dequeue)
-// Returns a pointer to a static buffer - caller should copy if needed
-char *dequeue(Queue* q) {
-    static char buffer[BUFFER_SIZE];  // Static buffer to hold dequeued value
-
-    if (q->front == NULL) { // If queue is empty
-        printf("Queue is empty!\n");
-        return NULL;
-    }
-    
-    Node* temp = q->front;
-    strncpy(buffer, temp->data, BUFFER_SIZE-1);  // Copy to static buffer
-    buffer[BUFFER_SIZE-1] = '\0';
-
-    q->front = q->front->next;
-
-    if (q->front == NULL) { // If queue becomes empty after dequeue
-        q->rear = NULL;
-    }
-    free(temp);  // Now safe to free
-    return buffer;
-}
 
 /**
  * @brief Comparison function for qsort() to sort nodes by IP address.
@@ -239,6 +178,7 @@ int get_next_node_index(int current_index) {
 void wait_for_turn(sync_state_t *state) {
     pthread_mutex_lock(&state->lock);
     while (!state->ready_to_send) {
+        // TODO: if we get a packet and its still in the source's window, forward the packet if this node is not the packet's destination
         pthread_cond_wait(&state->cond, &state->lock);
     }
     state->ready_to_send = 0; // Consume the "turn"
@@ -323,6 +263,7 @@ void* listener_thread(void* arg) {
         char log_msg[BUFFER_SIZE];
         snprintf(log_msg, sizeof(log_msg), "Received from Node %d (%s): \"%s\"",
                                             sender_index, sender_ip_str, recv_buffer);
+        log_event("RECV", log_msg);
 
         if (strncmp(recv_buffer, SYNC_PREFIX, strlen(SYNC_PREFIX)) == 0) {
             // Listener keeps a shared TDMA timeline by decoding SYNC broadcasts
@@ -362,47 +303,6 @@ void* listener_thread(void* arg) {
                 schedule_turn_timer(sync_state);
             }
         } 
-        else {
-            size_t msg_prefix_len = sizeof(MSG_PREFIX) - 1; // Accounts for null terminator
-            size_t dst_prefix_len = sizeof(DST_PREFIX) - 1; // Accounts for null terminator
-
-            if (strncmp(recv_buffer, MSG_PREFIX, msg_prefix_len) != 0) {
-                continue;
-            }
-
-            const char *cursor = recv_buffer + msg_prefix_len;
-            char *endptr = NULL;
-            // Get the source node's ID
-            long src_id = strtol(cursor, &endptr, 10);
-            if (endptr == cursor || *endptr != '|') {
-                continue;
-            }
-
-            cursor = endptr + 1; // Skip delimiter before DST prefix
-            if (strncmp(cursor, DST_PREFIX, dst_prefix_len) != 0) {
-                continue;
-            }
-
-            cursor += dst_prefix_len;
-            // Get the destination node's ID
-            long dst_id = strtol(cursor, &endptr, 10);
-            if (endptr == cursor || *endptr != '|') {
-                continue;
-            }
-
-            // If the destination node is this node, process the node
-            if ((int)dst_id == self_index) {
-                log_event("RECV", log_msg);
-                continue;
-            }
-            // If the sender index is not within the range, skip
-            if (sender_index < 0 || sender_index >= MAX_NODES) {
-                continue;
-            }
-
-            log_event("ENQUEUE", "Queueing the message");
-            enqueue(buffers[sender_index], recv_buffer);
-        }
     }
     return NULL;
 }
@@ -432,13 +332,10 @@ void broadcast_sync_packet(int sockfd, int self_index) {
  * @brief Sends a regular "MSG" packet to all other nodes.
  */
 void sendMessageToPeers(int sockfd, int self_index) {
-    log_event("SEND", "Sending MSG packet.");
-
-    // Since we only have one link, we can save the node
-    int link_node;
+    log_event("SEND", "Broadcasting MSG packet.");
     
     char message[128];
-    snprintf(message, sizeof(message), MSG_PREFIX "%d|" DST_PREFIX "%d|" "Hello from node %d!", self_index, 4, self_index);
+    snprintf(message, sizeof(message), MSG_PREFIX "Hello from node %d", self_index);
 
     if (self_index < 0 || self_index >= MAX_NODES) {
         log_event("ERROR", "Invalid self index for visibility matrix.");
@@ -449,27 +346,8 @@ void sendMessageToPeers(int sockfd, int self_index) {
         if (i == self_index) continue; // Don't send to self
         if (visibility_matrix[self_index][i] == 0) continue; // Not visible
 
-        // Save the link
-        link_node = i;
-
         sendto(sockfd, message, strlen(message), 0, 
                (struct sockaddr *)&node_list[i], sizeof(node_list[i]));
-    }
-
-    // Loop through all the queues, dequeue all the messages, and send them on the link
-    for (int src = 0; src < node_count; ++src) {
-        Queue *queue = buffers[src];
-        if (!queue || queue->front == NULL) continue;
-
-        while (queue->front != NULL) {
-            char *queued_msg = dequeue(queue);
-            if (!queued_msg) break;
-            size_t msg_len = strlen(queued_msg);
-            if (msg_len == 0) continue;
-
-            sendto(sockfd, queued_msg, msg_len, 0,
-                    (struct sockaddr *)&node_list[link_node], sizeof(node_list[link_node]));
-        }
     }
 }
 
@@ -542,7 +420,6 @@ int main() {
             printf("- Node %d: %s (ME)\n", i, ip_str);
         } else {
             printf("- Node %d: %s\n", i, ip_str);
-            buffers[i] = createQueue();
         }
     }
     printf("---------------------------\n");
@@ -623,10 +500,6 @@ int main() {
         // It's our turn, begin broadcast with SYNC
         broadcast_sync_packet(sockfd, self_index);
 
-        // For testing only send one message
-        sendMessageToPeers(sockfd, self_index);
-
-        /*
         // Continue sending MSGs until our window ends. This loop replaces perform_send_window()
         for (double current_time_sec = start_time_sec; (current_time_sec - start_time_sec) < SYNC_WINDOW_SECONDS; ) {
 
@@ -644,7 +517,6 @@ int main() {
             gettimeofday(&current_time, NULL);
             current_time_sec = (double)current_time.tv_sec + (double)current_time.tv_usec / 1e6;
         }
-        */
     }
 
     return 0;
