@@ -16,18 +16,33 @@
 // =============================================================================
 
 #define PORT 8080                   // Port for all nodes to listen on
-#define MAX_NODES 10 
+#define MAX_NODES 5 
 #define BUFFER_SIZE 1024
+#define QUEUE_SIZE 10
 #define LOG_FILENAME_FORMAT "/app/logs/node_%d.csv"
 #define SYNC_WINDOW_SECONDS 5      // Time (in sec) for each node's "turn"
-#define SYNC_PREFIX "SYNC|NODE:%d"
-#define MSG_PREFIX  "MSG|SRC:%d|DST:%d"
+#define SYNC_PREFIX "SYNC|"
+#define MSG_PREFIX  "MSG|"
 
-// Hard-coded visibility matrix: visibility_matrix[i][j] = 1 means node i can see node j
-// node-0 can see node-1 and node-2
-// node-1 can see node-0
-// node-2 can see node-0 and node-3
-// node-3 can see node-4
+// =============================================================================
+// --- Queue Implementation ---
+// =============================================================================
+typedef struct Node {
+    char data[1024];
+    struct Node* next;
+} Node;
+
+// Queue structure
+typedef struct Queue {
+    Node* front;
+    Node* rear;
+} Queue;
+
+// --- Globals ---
+FILE *log_file = NULL;
+struct sockaddr_in node_list[MAX_NODES]; // Holds all nodes (sorted)
+int node_count = 0;
+int self_index = -1; // Our unique, sorted ID (0 is "leader")
 static const int visibility_matrix[MAX_NODES][MAX_NODES] = {
     // node-0 can see: node-1
     {0, 1, 0, 0, 0},
@@ -40,12 +55,8 @@ static const int visibility_matrix[MAX_NODES][MAX_NODES] = {
     // node-4 can see: nobody
     {0, 0, 0, 0, 0}
 };
+Queue *buffers[MAX_NODES];
 
-// --- Globals ---
-FILE *log_file = NULL;
-struct sockaddr_in node_list[MAX_NODES]; // Holds all nodes (sorted)
-int node_count = 0;
-int self_index = -1; // Our unique, sorted ID (0 is "leader")
 
 /**
  * @brief Thread synchronization state for TDMA.
@@ -56,8 +67,6 @@ typedef struct {
     int ready_to_send;  // Flag (0 or 1)
     int timer_pending;  // Flag (0 or 1)
     int self_index;
-    double schedule_anchor_time;   // Absolute time when the anchor node started its slot
-    int schedule_anchor_index;     // Node index that owns the slot at schedule_anchor_time
 } sync_state_t;
 
 /**
@@ -84,6 +93,54 @@ void sendMessageToPeers(int sockfd, int self_index);
 // =============================================================================
 // --- GENERAL HELPER FUNCTIONS ---
 // =============================================================================
+
+// Function to create an empty queue
+Queue* createQueue() {
+    Queue* q = (Queue*)malloc(sizeof(Queue));
+    q->front = NULL;
+    q->rear = NULL;
+    return q;
+}
+
+// Function to add an element to the queue (enqueue)
+void enqueue(Queue* q, char *value) {
+    Node* newNode = (Node*)malloc(sizeof(Node));
+    strncpy(newNode->data, value, BUFFER_SIZE-1);  // Copy up to 1023 chars
+    newNode->data[BUFFER_SIZE-1] = '\0';           // Ensure null termination
+    newNode->next = NULL;
+
+    if (q->rear == NULL) { // If queue is empty
+        q->front = newNode;
+        q->rear = newNode;
+    } else {
+        q->rear->next = newNode;
+        q->rear = newNode;
+    }
+}
+
+// Function to remove an element from the queue (dequeue)
+// Returns a pointer to a static buffer - caller should copy if needed
+char *dequeue(Queue* q) {
+    static char buffer[BUFFER_SIZE];  // Static buffer to hold dequeued value
+
+    if (q->front == NULL) { // If queue is empty
+        printf("Queue is empty!\n");
+        return NULL;
+    }
+    
+    Node* temp = q->front;
+    strncpy(buffer, temp->data, BUFFER_SIZE-1);  // Copy to static buffer
+    buffer[BUFFER_SIZE-1] = '\0';
+
+    q->front = q->front->next;
+
+    if (q->front == NULL) { // If queue becomes empty after dequeue
+        q->rear = NULL;
+    }
+    free(temp);  // Now safe to free
+    return buffer;
+}
+
 
 /**
  * @brief Comparison function for qsort() to sort nodes by IP address.
@@ -178,7 +235,6 @@ int get_next_node_index(int current_index) {
 void wait_for_turn(sync_state_t *state) {
     pthread_mutex_lock(&state->lock);
     while (!state->ready_to_send) {
-        // TODO: if we get a packet and its still in the source's window, forward the packet if this node is not the packet's destination
         pthread_cond_wait(&state->cond, &state->lock);
     }
     state->ready_to_send = 0; // Consume the "turn"
@@ -266,43 +322,13 @@ void* listener_thread(void* arg) {
         log_event("RECV", log_msg);
 
         if (strncmp(recv_buffer, SYNC_PREFIX, strlen(SYNC_PREFIX)) == 0) {
-            // Listener keeps a shared TDMA timeline by decoding SYNC broadcasts
-            if (node_count <= 0) {
-                continue;
-            }
-
-            struct timeval now;
-            gettimeofday(&now, NULL);
-            double now_sec = (double)now.tv_sec + (double)now.tv_usec / 1e6;
-
-            char *turn_str = recv_buffer + strlen(SYNC_PREFIX); // Points to the textual node index inside SYNC payload
-            char *endptr = turn_str; // strtol() end pointer so we know if parsing succeeded
-            long advertised_index = strtol(turn_str, &endptr, 10); // Node ID explicitly announced by sender
-            int turn_owner = sender_index; // Fallback to sender if payload is missing/invalid
-
-            if (endptr != turn_str && advertised_index >= 0 && advertised_index < node_count) {
-                // Trust the advertised owner when the payload is well-formed and in-range
-                turn_owner = (int)advertised_index;
-            }
-
-            if (turn_owner < 0 || turn_owner >= node_count) {
-                // Drop malformed announcements so they don't poison the schedule
-                continue;
-            }
-
-            int schedule_self = 0;
-
-            pthread_mutex_lock(&sync_state->lock);
-            // Store the anchor so downstream logic can compute any node's slot without extra parsing
-            sync_state->schedule_anchor_index = turn_owner;
-            sync_state->schedule_anchor_time = now_sec;
-            schedule_self = (get_next_node_index(turn_owner) == sync_state->self_index);
-            pthread_mutex_unlock(&sync_state->lock);
-
-            if (schedule_self) {
+            int next_node_index = get_next_node_index(sender_index);
+            if (next_node_index == sync_state->self_index) {
                 schedule_turn_timer(sync_state);
             }
-        } 
+        } else {
+            // Get target info from message
+        }
     }
     return NULL;
 }
@@ -337,15 +363,8 @@ void sendMessageToPeers(int sockfd, int self_index) {
     char message[128];
     snprintf(message, sizeof(message), MSG_PREFIX "Hello from node %d", self_index);
 
-    if (self_index < 0 || self_index >= MAX_NODES) {
-        log_event("ERROR", "Invalid self index for visibility matrix.");
-        return;
-    }
-
     for (int i = 0; i < node_count; ++i) {
-        if (i == self_index) continue; // Don't send to self
-        if (visibility_matrix[self_index][i] == 0) continue; // Not visible
-
+        if (i == self_index || visibility_matrix[self_index][i] == 0) continue; // Don't send to self
         sendto(sockfd, message, strlen(message), 0, 
                (struct sockaddr *)&node_list[i], sizeof(node_list[i]));
     }
@@ -420,6 +439,8 @@ int main() {
             printf("- Node %d: %s (ME)\n", i, ip_str);
         } else {
             printf("- Node %d: %s\n", i, ip_str);
+            // make a message queue for each node
+            buffers[i] = createQueue();
         }
     }
     printf("---------------------------\n");
@@ -465,8 +486,6 @@ int main() {
     sync_state.self_index = self_index;
     sync_state.timer_pending = 0;
     sync_state.ready_to_send = (self_index == 0); // Node 0 starts
-    sync_state.schedule_anchor_index = self_index;
-    sync_state.schedule_anchor_time = 0.0; // Will be updated as soon as the first SYNC flows
 
     // 9. Start listener thread FIRST (before sending)
     pthread_t listener;
@@ -491,11 +510,6 @@ int main() {
         
         // Log entry into send window
         log_event("SEND", "Entering send window.");
-        pthread_mutex_lock(&sync_state.lock);
-        // advertise that this node is the current anchor so receivers can recalc the slot table
-        sync_state.schedule_anchor_index = self_index;
-        sync_state.schedule_anchor_time = start_time_sec;
-        pthread_mutex_unlock(&sync_state.lock);
         
         // It's our turn, begin broadcast with SYNC
         broadcast_sync_packet(sockfd, self_index);
@@ -509,7 +523,7 @@ int main() {
             sendMessageToPeers(sockfd, self_index);
             // Sleep for a short time to avoid flooding
             // In a real app, this might be a complex streaming loop.
-            sleep(2); // Send every 2 seconds
+            break;
             // ------------------------------------------------------
 
             // Update current time
