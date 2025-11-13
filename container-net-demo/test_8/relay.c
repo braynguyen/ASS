@@ -654,9 +654,8 @@ int main() {
         broadcast_sync_packet(sockfd, self_index);
 
         // For testing only send one message
-        sendMessageToPeers(sockfd, self_index);
+        //sendMessageToPeers(sockfd, self_index);
 
-        /*
         // Continue sending MSGs until our window ends. This loop replaces perform_send_window()
         for (double current_time_sec = start_time_sec; (current_time_sec - start_time_sec) < SYNC_WINDOW_SECONDS; ) {
 
@@ -674,7 +673,6 @@ int main() {
             gettimeofday(&current_time, NULL);
             current_time_sec = (double)current_time.tv_sec + (double)current_time.tv_usec / 1e6;
         }
-        */
     }
 
     return 0;
