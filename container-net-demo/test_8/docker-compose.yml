@@ -1,0 +1,77 @@
+services:
+  relay-node-0:
+    build: .
+    container_name: relay-node-0
+    environment:
+      - SERVICE_NAME=relay-node
+    networks:
+      mesh-net:
+        ipv4_address: 172.20.0.2
+        aliases:
+          - relay-node
+    # Mount the local './logs' folder into the container's '/app/logs'
+    volumes:
+      - ./logs:/app/logs
+
+  relay-node-1:
+    build: .
+    container_name: relay-node-1
+    environment:
+      - SERVICE_NAME=relay-node
+    networks:
+      mesh-net:
+        ipv4_address: 172.20.0.3
+        aliases:
+          - relay-node
+    # Mount the local './logs' folder into the container's '/app/logs'
+    volumes:
+      - ./logs:/app/logs
+
+  relay-node-2:
+    build: .
+    container_name: relay-node-2
+    environment:
+      - SERVICE_NAME=relay-node
+    networks:
+      mesh-net:
+        ipv4_address: 172.20.0.4
+        aliases:
+          - relay-node
+    # Mount the local './logs' folder into the container's '/app/logs'
+    volumes:
+      - ./logs:/app/logs
+
+  relay-node-3:
+    build: .
+    container_name: relay-node-3
+    environment:
+      - SERVICE_NAME=relay-node
+    networks:
+      mesh-net:
+        ipv4_address: 172.20.0.5
+        aliases:
+          - relay-node
+    # Mount the local './logs' folder into the container's '/app/logs'
+    volumes:
+      - ./logs:/app/logs
+
+  relay-node-4:
+    build: .
+    container_name: relay-node-4
+    environment:
+      - SERVICE_NAME=relay-node
+    networks:
+      mesh-net:
+        ipv4_address: 172.20.0.6
+        aliases:
+          - relay-node
+    # Mount the local './logs' folder into the container's '/app/logs'
+    volumes:
+      - ./logs:/app/logs
+
+networks:
+  mesh-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16 # 16 bits of address space to work with
