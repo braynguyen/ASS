@@ -1,6 +1,6 @@
 #!/bin/bash
 # This script runs N relay-node containers using Docker Compose.
-# Usage: ./run-multi.sh [num_containers]    (default: 3)
+# Usage: ./run-multi.sh [num_containers]    (default: 5)
 
 # ----------------------------------------------------------------------------------
 # This script builds and starts NUM_CONTAINERS instances of the `relay-node`
@@ -8,7 +8,7 @@
 # are removed when the relay processes exit normally or when you press Ctrl+C.
 # ----------------------------------------------------------------------------------
 
-NUM_CONTAINERS=${1:-3}
+NUM_CONTAINERS=${1:-5}
 
 # 1. Define the cleanup function (called on Ctrl+C)
 cleanup() {

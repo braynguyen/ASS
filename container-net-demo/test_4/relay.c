@@ -14,6 +14,25 @@
 #define SYNC_PREFIX "SYNC|"
 #define MSG_PREFIX  "MSG|"
 #define SYNC_WINDOW_SECONDS 10
+#define MAX_NODES 5
+
+// Hard-coded visibility matrix: visibility_matrix[i][j] = 1 means node i can see node j
+// node-0 can see node-1 and node-2
+// node-1 can see node-0
+// node-2 can see node-0 and node-3
+// node-3 can see node-4
+static const int visibility_matrix[MAX_NODES][MAX_NODES] = {
+    // node-0 can see: node-1
+    {0, 1, 0, 0, 0},
+    // node-1 can see: node-2
+    {0, 0, 1, 0, 0},
+    // node-2 can see: node-3
+    {0, 0, 0, 1, 0},
+    // node-3 can see: node-4
+    {0, 0, 0, 0, 1},
+    // node-4 can see: nobody
+    {0, 0, 0, 0, 0}
+};
 
 // Struct for node information
 typedef struct {
@@ -155,7 +174,7 @@ peer_info_t* build_peer_map(struct addrinfo *addrinfo_list, int *peer_count) {
     // sort by ip addresss so every node has the same ordering
     qsort(peers, count, sizeof(peer_info_t), compare_peer_info);
     for (int i = 0; i < count; ++i) {
-        peers[i].node_number = i + 1;
+        peers[i].node_number = i;
     }
     *peer_count = count;
     return peers;
@@ -253,8 +272,10 @@ void sendMessageToPeers(
     const char* self_ip,
     int self_node_number) 
 {
-    for (int i = 0; i < peer_count; ++i) {
-        if (strcmp(peer_map[i].ip, self_ip) == 0) {
+    // TODO: change this to map
+    for (int i = 0; i < peer_count; ++i)
+    {
+        if (strcmp(peer_map[i].ip, self_ip) == 0 || visibility_matrix[self_node_number][peer_map[i].node_number] == 0) {
             continue;
         }
 
@@ -435,7 +456,7 @@ int main() {
     pthread_cond_init(&sync_state.cond, NULL);
     sync_state.self_node_number = self_node_number;
     sync_state.timer_pending = 0;
-    sync_state.ready_to_send = (self_node_number == 1);
+    sync_state.ready_to_send = (self_node_number == 0);
 
     // 7. Start listener thread FIRST (before sending)
     pthread_t listener;
