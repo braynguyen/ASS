@@ -121,7 +121,7 @@ void enqueue(Queue* q, char *value) {
 // Function to remove an element from the queue (dequeue)
 // Returns a pointer to a static buffer - caller should copy if needed
 char *dequeue(Queue* q) {
-    static char buffer[1024];  // Static buffer to hold dequeued value
+    static char buffer[BUFFER_SIZE];  // Static buffer to hold dequeued value
 
     if (q->front == NULL) { // If queue is empty
         printf("Queue is empty!\n");
