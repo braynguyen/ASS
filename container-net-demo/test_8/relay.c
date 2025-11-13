@@ -457,7 +457,8 @@ void sendMessageToPeers(int sockfd, int self_index) {
     log_event("SEND", "Sending MSG packet.");
 
     // Since we only have one link, we can save the node
-    int link_node;
+    // Not needed but will keep in case we need to revert
+    //int link_node;
     
     char message[128];
     snprintf(message, sizeof(message), MSG_PREFIX "%d|" DST_PREFIX "%d|" "Hello from node %d!", self_index, 4, self_index);
@@ -472,12 +473,16 @@ void sendMessageToPeers(int sockfd, int self_index) {
         if (visibility_matrix[self_index][i] == 0) continue; // Not visible
 
         // Save the link
-        link_node = i;
+        // Not needed but will keep in case we need to revert
+        //link_node = i;
 
         sendto(sockfd, message, strlen(message), 0, 
                (struct sockaddr *)&node_list[i], sizeof(node_list[i]));
     }
 
+    /*
+     * Shouldn't be needed anymore since nodes forward messages during the time slot of the node
+     * Will keep anyways just in case
     // Loop through all the queues, dequeue all the messages, and send them on the link
     for (int src = 0; src < node_count; ++src) {
         Queue *queue = buffers[src];
@@ -494,6 +499,7 @@ void sendMessageToPeers(int sockfd, int self_index) {
                     (struct sockaddr *)&node_list[link_node], sizeof(node_list[link_node]));
         }
     }
+    */
 }
 
 // =============================================================================
