@@ -94,7 +94,7 @@ void* turn_timer_thread(void* arg);
 void schedule_turn_timer(sync_state_t *state);
 void* listener_thread(void* arg);
 void broadcast_sync_packet(int sockfd, int self_index);
-void sendMessageToPeers(int sockfd, int self_index);
+void sendMessageToPeers(int sockfd, int self_index, int slotRun, int messageNumber);
 
 // =============================================================================
 // --- GENERAL HELPER FUNCTIONS ---
@@ -453,7 +453,7 @@ void broadcast_sync_packet(int sockfd, int self_index) {
 /**
  * @brief Sends a regular "MSG" packet to all other nodes.
  */
-void sendMessageToPeers(int sockfd, int self_index) {
+void sendMessageToPeers(int sockfd, int self_index, int slotRun, int messageNumber) {
     log_event("SEND", "Sending MSG packet.");
 
     // Since we only have one link, we can save the node
@@ -461,7 +461,7 @@ void sendMessageToPeers(int sockfd, int self_index) {
     //int link_node;
     
     char message[128];
-    snprintf(message, sizeof(message), MSG_PREFIX "%d|" DST_PREFIX "%d|" "Hello from node %d!", self_index, 4, self_index);
+    snprintf(message, sizeof(message), MSG_PREFIX "%d|" DST_PREFIX "%d|" "Hello from node %d! Slot #%d message #%d", self_index, 4, self_index, slotRun, messageNumber);
 
     if (self_index < 0 || self_index >= MAX_NODES) {
         log_event("ERROR", "Invalid self index for visibility matrix.");
@@ -479,27 +479,6 @@ void sendMessageToPeers(int sockfd, int self_index) {
         sendto(sockfd, message, strlen(message), 0, 
                (struct sockaddr *)&node_list[i], sizeof(node_list[i]));
     }
-
-    /*
-     * Shouldn't be needed anymore since nodes forward messages during the time slot of the node
-     * Will keep anyways just in case
-    // Loop through all the queues, dequeue all the messages, and send them on the link
-    for (int src = 0; src < node_count; ++src) {
-        Queue *queue = buffers[src];
-        if (!queue || queue->front == NULL) continue;
-
-        while (queue->front != NULL) {
-            char *queued_msg = dequeue(queue);
-            if (!queued_msg) break;
-            size_t msg_len = strlen(queued_msg);
-            if (msg_len == 0) continue;
-
-            log_event("SEND", "Forwarding a packet");
-            sendto(sockfd, queued_msg, msg_len, 0,
-                    (struct sockaddr *)&node_list[link_node], sizeof(node_list[link_node]));
-        }
-    }
-    */
 }
 
 // =============================================================================
@@ -633,6 +612,8 @@ int main() {
     log_event("SYNC", "Waiting for all listeners to be ready...");
     sleep(2);
 
+    int slotRun = 1;
+
     // 10. Main thread becomes the "Sender"
     while (1) {
         wait_for_turn(sockfd, &sync_state);
@@ -656,13 +637,15 @@ int main() {
         // For testing only send one message
         //sendMessageToPeers(sockfd, self_index);
 
+        int messageNumber = 1;
+
         // Continue sending MSGs until our window ends. This loop replaces perform_send_window()
         for (double current_time_sec = start_time_sec; (current_time_sec - start_time_sec) < SYNC_WINDOW_SECONDS; ) {
 
             // --- This is where you would stream data --------------
             // For now, we'll just send one message and then sleep
             // to simulate a non-blocking stream.
-            sendMessageToPeers(sockfd, self_index);
+            sendMessageToPeers(sockfd, self_index, slotRun, messageNumber);
             // Sleep for a short time to avoid flooding
             // In a real app, this might be a complex streaming loop.
             sleep(2); // Send every 2 seconds
@@ -672,7 +655,12 @@ int main() {
             struct timeval current_time;
             gettimeofday(&current_time, NULL);
             current_time_sec = (double)current_time.tv_sec + (double)current_time.tv_usec / 1e6;
+
+            // keep track of sent message this run 
+            messageNumber++;
         }
+        // keep track of every time slot has come up
+        slotRun++;
     }
 
     return 0;
