@@ -1,5 +1,1 @@
-client
-server
-test_multi_client
-relay
-.vscode/
+logs/
