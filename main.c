@@ -13,7 +13,7 @@
 #include <errno.h>      // For ETIMEDOUT
 
 // =============================================================================
-// --- CONFIGURATION & GLOBALS ---
+// --- CONFIGURATION & CONSTANTS ---
 // =============================================================================
 
 #define PORT 8080                   // Port for all nodes to listen on
@@ -21,50 +21,50 @@
 #define BUFFER_SIZE 1024
 #define LOG_FILENAME_FORMAT "/app/logs/node_%d.csv"
 #define SYNC_WINDOW_SECONDS 5      // Time (in sec) for each node's "turn"
-#define SYNC_PREFIX "SYNC|"
-#define MSG_PREFIX  "MSG|"
-#define DST_PREFIX  "DST|"
-#define QUEUE_SIZE 10
+#define PACKET_PAYLOAD_SIZE 256
 
 // Hard-coded visibility matrix: visibility_matrix[i][j] = 1 means node i can see node j
-// node-0 can see node-1 and node-2
-// node-1 can see node-0
-// node-2 can see node-0 and node-3
-// node-3 can see node-4
 static const int visibility_matrix[MAX_NODES][MAX_NODES] = {
-    // node-0 can see: node-1
-    {0, 1, 0, 0, 0},
-    // node-1 can see: node-2
-    {0, 0, 1, 0, 0},
-    // node-2 can see: node-3
-    {0, 0, 0, 1, 0},
-    // node-3 can see: node-4
-    {0, 0, 0, 0, 1},
-    // node-4 can see: nobody
-    {0, 0, 0, 0, 0}
+    {0, 1, 0, 0, 0},    // node-0 can see: node-1
+    {0, 0, 1, 0, 0},    // node-1 can see: node-2
+    {0, 0, 0, 1, 0},    // node-2 can see: node-3
+    {0, 0, 0, 0, 1},    // node-3 can see: node-4
+    {0, 0, 0, 0, 0}     // node-4 can see: nobody
 };
 
+// =============================================================================
+// --- DATA STRUCTURES ---
+// =============================================================================
+
+typedef enum {
+    PACKET_TYPE_SYNC,
+    PACKET_TYPE_MSG
+} packet_type_t;
+
+// Packet Structure (Replaces String Parsing)
+typedef struct {
+    packet_type_t type;
+    int src_index;
+    int dst_index;
+    int slot_id;
+    int msg_id;
+    char payload[PACKET_PAYLOAD_SIZE];
+} app_packet_t;
+
+// Queue Node
 typedef struct Node {
-    char data[1024];
+    app_packet_t packet;
     struct Node* next;
-} Node;
+} node_t;
 
-// Queue structure
-typedef struct Queue {
-    Node* front;
-    Node* rear;
-} Queue;
+// Thread-Safe Queue Wrapper
+typedef struct {
+    node_t* front;
+    node_t* rear;
+    pthread_mutex_t lock; // Protects this specific queue
+} thread_safe_queue_t;
 
-// --- Globals ---
-FILE *log_file = NULL;
-struct sockaddr_in node_list[MAX_NODES]; // Holds all nodes (sorted)
-int node_count = 0;
-int self_index = -1; // Our unique, sorted ID (0 is "leader")
-Queue *buffers[MAX_NODES];
-
-/**
- * @brief Thread synchronization state for TDMA.
- */
+// TDMA Synchronization State
 typedef struct {
     pthread_mutex_t lock;
     pthread_cond_t cond;
@@ -75,46 +75,67 @@ typedef struct {
     int schedule_anchor_index;     // Node index that owns the slot at schedule_anchor_time
 } sync_state_t;
 
-/**
- * @brief Arguments for the listener thread.
- */
+// Arguments for the listener thread.
 typedef struct {
     int sockfd;
     sync_state_t *sync_state;
 } listener_args_t;
 
-// --- Function Prototypes ---
+// =============================================================================
+// --- GLOBALS ---
+// =============================================================================
+
+FILE *log_file = NULL;
+struct sockaddr_in node_list[MAX_NODES]; // Holds all nodes (sorted)
+int node_count = 0;
+int self_index = -1; // Our unique, sorted ID (0 is "leader")
+thread_safe_queue_t* message_buffers[MAX_NODES]; // Array of queues (one per node)
+
+// =============================================================================
+// --- FUNCTION PROTOTYPES ---
+// =============================================================================
+
+// Queue
+thread_safe_queue_t* create_queue();
+void enqueue(thread_safe_queue_t* q, app_packet_t *packet);
+int dequeue(thread_safe_queue_t* q, app_packet_t *out_packet);
+
+// Helpers
 int compare_nodes(const void *a, const void *b);
 void log_event(const char *type, const char *message);
 int get_self_ip(in_addr_t *ip_numeric);
 int get_node_index_for_addr(struct in_addr *sender_ip);
 int get_next_node_index(int current_index);
+
+// TDMA & Thread Sync
 void wait_for_turn(int sockfd, sync_state_t *state);
 void* turn_timer_thread(void* arg);
 void schedule_turn_timer(sync_state_t *state);
 void* listener_thread(void* arg);
 void broadcast_sync_packet(int sockfd, int self_index);
 void sendMessageToPeers(int sockfd, int self_index, int slotRun, int messageNumber);
+void send_app_packet(int sockfd, app_packet_t *packet, int target_node_index);
 
 // =============================================================================
-// --- GENERAL HELPER FUNCTIONS ---
+// --- THREAD-SAFE QUEUE IMPLEMENTATION ---
 // =============================================================================
 
 // Function to create an empty queue
-Queue* createQueue() {
-    Queue* q = (Queue*)malloc(sizeof(Queue));
+thread_safe_queue_t* create_queue() {
+    thread_safe_queue_t* q = (thread_safe_queue_t*)malloc(sizeof(thread_safe_queue_t));    q->front = NULL;
     q->front = NULL;
     q->rear = NULL;
+    pthread_mutex_init(&q->lock, NULL);
     return q;
 }
 
 // Function to add an element to the queue (enqueue)
-void enqueue(Queue* q, char *value) {
-    Node* newNode = (Node*)malloc(sizeof(Node));
-    strncpy(newNode->data, value, BUFFER_SIZE-1);  // Copy up to 1023 chars
-    newNode->data[BUFFER_SIZE-1] = '\0';           // Ensure null termination
+void enqueue(thread_safe_queue_t* q, app_packet_t *packet) {
+    node_t* newNode = (node_t*)malloc(sizeof(node_t));
+    newNode->packet = *packet; // Copy struct data
     newNode->next = NULL;
 
+    pthread_mutex_lock(&q->lock);
     if (q->rear == NULL) { // If queue is empty
         q->front = newNode;
         q->rear = newNode;
@@ -122,30 +143,36 @@ void enqueue(Queue* q, char *value) {
         q->rear->next = newNode;
         q->rear = newNode;
     }
+    pthread_mutex_unlock(&q->lock);
 }
 
 // Function to remove an element from the queue (dequeue)
-// Returns a pointer to a static buffer - caller should copy if needed
-char *dequeue(Queue* q) {
-    static char buffer[BUFFER_SIZE];  // Static buffer to hold dequeued value
-
+// Returns 1 if packet retrieved, 0 if empty
+int dequeue(thread_safe_queue_t* q, app_packet_t *out_packet) {
+    if (!q) return 0;   // <- safe-guard: empty/NULL queue means nothing to dequeue
+    pthread_mutex_lock(&q->lock);
     if (q->front == NULL) { // If queue is empty
-        printf("Queue is empty!\n");
-        return NULL;
+        // printf("Queue is empty!\n");
+        pthread_mutex_unlock(&q->lock);
+        return 0; // Indicate empty
     }
     
-    Node* temp = q->front;
-    strncpy(buffer, temp->data, BUFFER_SIZE-1);  // Copy to static buffer
-    buffer[BUFFER_SIZE-1] = '\0';
+    node_t* temp = q->front;
+    *out_packet = temp->packet; // Copy struct data
 
     q->front = q->front->next;
 
     if (q->front == NULL) { // If queue becomes empty after dequeue
         q->rear = NULL;
     }
+    pthread_mutex_unlock(&q->lock);
     free(temp);  // Now safe to free
-    return buffer;
+    return 1; // Indicate success
 }
+
+// =============================================================================
+// --- GENERAL HELPER FUNCTIONS ---
+// =============================================================================
 
 /**
  * @brief Comparison function for qsort() to sort nodes by IP address.
@@ -239,7 +266,7 @@ int get_next_node_index(int current_index) {
  */
 void wait_for_turn(int sockfd, sync_state_t *state) {
     const long queue_poll_ns = 10L * 1000L * 1000L; // 10ms polling time
-    int link_node;
+    int link_node = -1;
 
     // Get the link node we need to send messages to
     for (int i = 0; i < node_count; ++i) {
@@ -264,23 +291,19 @@ void wait_for_turn(int sockfd, sync_state_t *state) {
         wake_time.tv_sec += wake_time.tv_nsec / 1000000000L;
         wake_time.tv_nsec %= 1000000000L;
         int wait_rc = pthread_cond_timedwait(&state->cond, &state->lock, &wake_time);
+        int anchor_index = state->schedule_anchor_index;
         pthread_mutex_unlock(&state->lock);
 
         // Poll the queue at the end of the timeout
         if (wait_rc == ETIMEDOUT) {
-            int src = state->schedule_anchor_index;
-            Queue *queue = buffers[src];
-            if (!queue || queue->front == NULL) continue;
-            // Forward messages in the queue if they exist
-            while (queue->front != NULL) {
-                char *queued_msg = dequeue(queue);
-                if (!queued_msg) break;
-                size_t msg_len = strlen(queued_msg);
-                if (msg_len == 0) continue;
-
-                log_event("FORWARD", "Forwarding message.");
-                sendto(sockfd, queued_msg, msg_len, 0,
-                    (struct sockaddr *)&node_list[link_node], sizeof(node_list[link_node]));
+            // validate anchor_index and corresponding buffer
+            if (anchor_index < 0 || anchor_index >= node_count) continue;
+            if (message_buffers[anchor_index] == NULL) continue;
+            app_packet_t packet;
+            // Dequeue all pending packets from the anchor's buffer
+            while (dequeue(message_buffers[anchor_index], &packet)) {
+                log_event("FWD", "Forwarding queued message.");
+                send_app_packet(sockfd, &packet, link_node);
             }
         }
     }
@@ -348,29 +371,37 @@ void* listener_thread(void* arg) {
     log_event("INIT", "Listener thread started.");
 
     while (1) {
-        int bytes_received = recvfrom(sockfd, recv_buffer, sizeof(recv_buffer) - 1, 0,
+        int bytes_received = recvfrom(sockfd, recv_buffer, sizeof(recv_buffer), 0,
                                       (struct sockaddr*)&sender_addr, &addr_len);
         if (bytes_received < 0) {
             log_event("ERROR", "recvfrom() failed");
             continue;
         }
-        recv_buffer[bytes_received] = '\0'; // Null-terminate
 
         // Get sender's info from sender_addr
         char sender_ip_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &(sender_addr.sin_addr), sender_ip_str, sizeof(sender_ip_str));
         int sender_index = get_node_index_for_addr(&sender_addr.sin_addr);
 
-        char log_msg[BUFFER_SIZE];
-        snprintf(log_msg, sizeof(log_msg), "Received from Node %d (%s): \"%s\"",
-                                            sender_index, sender_ip_str, recv_buffer);
+        if (sender_index < 0) {
+            // Unknown sender (not in sorted node_list). Log and ignore
+            char warn_msg[128];
+            snprintf(warn_msg, sizeof(warn_msg), "Received packet from unknown IP %s; ignoring.", sender_ip_str);
+            log_event("WARN", warn_msg);
+            continue;
+        }
 
-        if (strncmp(recv_buffer, SYNC_PREFIX, strlen(SYNC_PREFIX)) == 0) {
+        // Validate packet size
+        if (bytes_received != sizeof(app_packet_t)) {
+            log_event("WARN", "Received packet of incorrect size. Ignoring.");
+            continue;
+        }
+
+        // Parse the received packet into struct app_packet_t
+        app_packet_t *packet = (app_packet_t *)recv_buffer;
+
+        if (packet->type == PACKET_TYPE_SYNC) {
             // Listener keeps a shared TDMA timeline by decoding SYNC broadcasts
-            if (node_count <= 0) {
-                continue;
-            }
-
             struct timeval now;
             gettimeofday(&now, NULL);
             double now_sec = (double)now.tv_sec + (double)now.tv_usec / 1e6;
@@ -379,53 +410,41 @@ void* listener_thread(void* arg) {
 
             pthread_mutex_lock(&sync_state->lock);
             // Store the anchor so downstream logic can compute any node's slot without extra parsing
-            sync_state->schedule_anchor_index = sender_index;
+            sync_state->schedule_anchor_index = packet->src_index;
             sync_state->schedule_anchor_time = now_sec;
-            schedule_self = (get_next_node_index(sender_index) == sync_state->self_index);
+            schedule_self = (get_next_node_index(packet->src_index) == sync_state->self_index);
             pthread_mutex_unlock(&sync_state->lock);
 
             if (schedule_self) {
+                char log_msg[64];
+                snprintf(log_msg, sizeof(log_msg), "Received SYNC from %d. Scheduling timer.", packet->src_index);
+                log_event("SYNC", log_msg);
                 schedule_turn_timer(sync_state);
             }
-        } 
-        else {
-            size_t msg_prefix_len = sizeof(MSG_PREFIX) - 1; // Accounts for null terminator
-            size_t dst_prefix_len = sizeof(DST_PREFIX) - 1; // Accounts for null terminator
-
-            if (strncmp(recv_buffer, MSG_PREFIX, msg_prefix_len) != 0) {
-                continue;
-            }
-
-            const char *cursor = recv_buffer + msg_prefix_len;
-            char *endptr = NULL;
-            // Get the source node's ID
-            long src_id = strtol(cursor, &endptr, 10);
-            if (endptr == cursor || *endptr != '|') {
-                continue;
-            }
-
-            cursor = endptr + 1; // Skip delimiter before DST prefix
-            if (strncmp(cursor, DST_PREFIX, dst_prefix_len) != 0) {
-                continue;
-            }
-
-            cursor += dst_prefix_len;
-            // Get the destination node's ID
-            long dst_id = strtol(cursor, &endptr, 10);
-            if (endptr == cursor || *endptr != '|') {
-                continue;
-            }
-
-            // If the destination node is this node, process the node
-            if ((int)dst_id == self_index) {
+        } // End of packet SYNC handling
+        else if (packet->type == PACKET_TYPE_MSG) {
+            // Message Routing Logic
+            if (packet->dst_index == self_index) {
+                // It's for us!
+                char log_msg[512];
+                snprintf(log_msg, sizeof(log_msg), "RECEIVED MSG from Node %d: %s", 
+                         packet->src_index, packet->payload);
                 log_event("RECV", log_msg);
-                continue;
+            } else {
+                // It's for someone else. Queue it.
+                if (packet->src_index >= 0 && packet->src_index < node_count) {
+                    char log_msg[128];
+                    snprintf(log_msg, sizeof(log_msg), "Queueing MSG from %d for %d", 
+                             packet->src_index, packet->dst_index);
+                    log_event("QUE", log_msg);
+                    
+                    if (message_buffers[packet->src_index]) {
+                        enqueue(message_buffers[packet->src_index], packet);
+                    }
+                }
             }
-
-            log_event("ENQUEUE", "Queueing the message");
-            enqueue(buffers[src_id], recv_buffer);
-        }
-    }
+        } // End of packet MSG handling
+    } // End of while(1)
     return NULL;
 }
 
@@ -434,19 +453,32 @@ void* listener_thread(void* arg) {
 // =============================================================================
 
 /**
+ * @brief Helper to send a struct packet to a specific node index
+ */
+void send_app_packet(int sockfd, app_packet_t *packet, int target_node_index) {
+    if (target_node_index < 0 || target_node_index >= node_count) return;
+    
+    sendto(sockfd, packet, sizeof(app_packet_t), 0,
+           (struct sockaddr *)&node_list[target_node_index], sizeof(node_list[target_node_index]));
+}
+
+/**
  * @brief Broadcasts a "SYNC" packet to all other nodes.
  */
 void broadcast_sync_packet(int sockfd, int self_index) {
     log_event("SEND", "Broadcasting SYNC packet.");
 
-    char message[64];
-    snprintf(message, sizeof(message), SYNC_PREFIX "%d", self_index);
+    app_packet_t packet;
+    packet.type = PACKET_TYPE_SYNC;
+    packet.src_index = self_index;
+    packet.dst_index = -1; // Broadcast
+    packet.slot_id = 0;
+    packet.msg_id = 0;
+    memset(packet.payload, 0, sizeof(packet.payload));
 
     for (int i = 0; i < node_count; ++i) {
         if (i == self_index) continue; // Don't send to self
-
-        sendto(sockfd, message, strlen(message), 0, 
-               (struct sockaddr *)&node_list[i], sizeof(node_list[i]));
+        send_app_packet(sockfd, &packet, i);
     }
 }
 
@@ -460,8 +492,13 @@ void sendMessageToPeers(int sockfd, int self_index, int slotRun, int messageNumb
     // Not needed but will keep in case we need to revert
     //int link_node;
     
-    char message[128];
-    snprintf(message, sizeof(message), MSG_PREFIX "%d|" DST_PREFIX "%d|" "Hello from node %d! Slot #%d message #%d", self_index, 4, self_index, slotRun, messageNumber);
+    app_packet_t packet;
+    packet.type = PACKET_TYPE_MSG;
+    packet.src_index = self_index;
+    packet.dst_index = node_count-1; // For simplicity, send to last node (can be changed)
+    packet.slot_id = slotRun;
+    packet.msg_id = messageNumber;
+    snprintf(packet.payload, sizeof(packet.payload), "Hello from node %d! Slot #%d message #%d", self_index, slotRun, messageNumber);
 
     if (self_index < 0 || self_index >= MAX_NODES) {
         log_event("ERROR", "Invalid self index for visibility matrix.");
@@ -476,8 +513,7 @@ void sendMessageToPeers(int sockfd, int self_index, int slotRun, int messageNumb
         // Not needed but will keep in case we need to revert
         //link_node = i;
 
-        sendto(sockfd, message, strlen(message), 0, 
-               (struct sockaddr *)&node_list[i], sizeof(node_list[i]));
+        send_app_packet(sockfd, &packet, i);
     }
 }
 
@@ -550,8 +586,9 @@ int main() {
             printf("- Node %d: %s (ME)\n", i, ip_str);
         } else {
             printf("- Node %d: %s\n", i, ip_str);
-            buffers[i] = createQueue();
         }
+        // Ensure a queue exists for every index (including self) to avoid NULL derefs
+        message_buffers[i] = create_queue();
     }
     printf("---------------------------\n");
     fflush(stdout);
