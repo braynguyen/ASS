@@ -23,6 +23,10 @@
 #define SYNC_WINDOW_SECONDS 5      // Time (in sec) for each node's "turn"
 #define PACKET_PAYLOAD_SIZE 256
 
+// --- NETWORK SIMULATION PARAMETERS ---
+#define SIM_MIN_DELAY_MS    10      // Minimum latency per hop
+#define SIM_MAX_DELAY_MS    1000    // Maximum latency per hop (Jitter)
+
 // Hard-coded visibility matrix: visibility_matrix[i][j] = 1 means node i can see node j
 static const int visibility_matrix[MAX_NODES][MAX_NODES] = {
     {0, 1, 0, 0, 0},    // node-0 can see: node-1
@@ -302,7 +306,10 @@ void wait_for_turn(int sockfd, sync_state_t *state) {
             app_packet_t packet;
             // Dequeue all pending packets from the anchor's buffer
             while (dequeue(message_buffers[anchor_index], &packet)) {
-                log_event("FWD", "Forwarding queued message.");
+                char log_msg[256];
+                snprintf(log_msg, sizeof(log_msg), "PKT %d->%d (S:%d M:%d) | Forwarding packet", 
+                          packet.src_index, packet.dst_index, packet.slot_id, packet.msg_id);
+                log_event("FWD", log_msg);
                 send_app_packet(sockfd, &packet, link_node);
             }
         }
@@ -427,15 +434,15 @@ void* listener_thread(void* arg) {
             if (packet->dst_index == self_index) {
                 // It's for us!
                 char log_msg[512];
-                snprintf(log_msg, sizeof(log_msg), "RECEIVED MSG from Node %d: %s", 
-                         packet->src_index, packet->payload);
+                snprintf(log_msg, sizeof(log_msg), "PKT %d->%d (S:%d M:%d) | Arrived at destination: %s", 
+                         packet->src_index, packet->dst_index, packet->slot_id, packet->msg_id, packet->payload);
                 log_event("RECV", log_msg);
             } else {
                 // It's for someone else. Queue it.
                 if (packet->src_index >= 0 && packet->src_index < node_count) {
                     char log_msg[128];
-                    snprintf(log_msg, sizeof(log_msg), "Queueing MSG from %d for %d", 
-                             packet->src_index, packet->dst_index);
+                    snprintf(log_msg, sizeof(log_msg), "PKT %d->%d (S:%d M:%d) | Queuing for forward", 
+                             packet->src_index, packet->dst_index, packet->slot_id, packet->msg_id);
                     log_event("QUE", log_msg);
                     
                     if (message_buffers[packet->src_index]) {
@@ -458,6 +465,12 @@ void* listener_thread(void* arg) {
 void send_app_packet(int sockfd, app_packet_t *packet, int target_node_index) {
     if (target_node_index < 0 || target_node_index >= node_count) return;
     
+    // --- SIMULATION: NETWORK DELAY (JITTER) ---
+    // Calculate a random delay between MIN and MAX
+    int delay_ms = SIM_MIN_DELAY_MS + (rand() % (SIM_MAX_DELAY_MS - SIM_MIN_DELAY_MS + 1));
+    // Blocking sleep to simulate transmission time/propagation delay
+    usleep(delay_ms * 1000);
+
     sendto(sockfd, packet, sizeof(app_packet_t), 0,
            (struct sockaddr *)&node_list[target_node_index], sizeof(node_list[target_node_index]));
 }
@@ -466,7 +479,7 @@ void send_app_packet(int sockfd, app_packet_t *packet, int target_node_index) {
  * @brief Broadcasts a "SYNC" packet to all other nodes.
  */
 void broadcast_sync_packet(int sockfd, int self_index) {
-    log_event("SEND", "Broadcasting SYNC packet.");
+    log_event("SYNC", "Broadcasting SYNC packet.");
 
     app_packet_t packet;
     packet.type = PACKET_TYPE_SYNC;
@@ -486,7 +499,6 @@ void broadcast_sync_packet(int sockfd, int self_index) {
  * @brief Sends a regular "MSG" packet to all other nodes.
  */
 void sendMessageToPeers(int sockfd, int self_index, int slotRun, int messageNumber) {
-    log_event("SEND", "Sending MSG packet.");
 
     // Since we only have one link, we can save the node
     // Not needed but will keep in case we need to revert
@@ -512,6 +524,11 @@ void sendMessageToPeers(int sockfd, int self_index, int slotRun, int messageNumb
         // Save the link
         // Not needed but will keep in case we need to revert
         //link_node = i;
+
+        char log_msg[256];
+        snprintf(log_msg, sizeof(log_msg), "PKT %d->%d (S:%d M:%d) | Originating packet", 
+                 packet.src_index, packet.dst_index, packet.slot_id, packet.msg_id);
+        log_event("SEND", log_msg);
 
         send_app_packet(sockfd, &packet, i);
     }
@@ -651,6 +668,9 @@ int main() {
 
     int slotRun = 1;
 
+    // Seed the random number generator for latency simulation
+    srand(time(NULL) ^ self_ip_numeric);
+
     // 10. Main thread becomes the "Sender"
     while (1) {
         wait_for_turn(sockfd, &sync_state);
@@ -661,7 +681,7 @@ int main() {
         double start_time_sec = (double)start_time.tv_sec + (double)start_time.tv_usec / 1e6;
         
         // Log entry into send window
-        log_event("SEND", "Entering send window.");
+        log_event("INFO", "Entering send window.");
         pthread_mutex_lock(&sync_state.lock);
         // advertise that this node is the current anchor so receivers can recalc the slot table
         sync_state.schedule_anchor_index = self_index;
