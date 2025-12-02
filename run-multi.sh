@@ -16,6 +16,9 @@ NUM_CONTAINERS=5
 # Default behavior is to unlimited; unset with no -runonce flag sets to 1
 RUN_ONCE=0
 
+# Ensure cleanup only runs once
+CLEANED_UP=0
+
 usage() {
     echo "Usage: $0 -n NUM_CONTAINERS [-runonce]"
     exit 1
@@ -54,7 +57,13 @@ fi
 
 # 1. Define the cleanup function (called on Ctrl+C)
 cleanup() {
-   echo "" # Add a newline for readability
+    # Prevent double cleanup from multiple traps
+    if [ "$CLEANED_UP" -eq 1 ]; then
+         return
+    fi
+    CLEANED_UP=1
+
+    echo "" # Add a newline for readability
 
     # Always run docker compose down. Stops any running containers
     # and removes them along with networks.
@@ -63,13 +72,18 @@ cleanup() {
 
     # Combine the logs.
     echo "Combining node logs into ./logs/merged_log.csv..."
-    cat ./logs/node_*.csv | grep -v "Timestamp" | sort > ./logs/merged_log.csv
+    if ls ./logs/node_*.csv >/dev/null 2>&1; then
+        # Remove per-file headers, sort, and write merged output
+        cat ./logs/node_*.csv | grep -v "^Timestamp" | sort > ./logs/merged_log.csv
+    else
+        echo "No node logs found; skipping merge."
+    fi
     
     echo "Cleanup complete."
 }
 
-# 2. Set the trap to call the 'cleanup' function on Ctrl+C
-trap cleanup SIGINT
+# 2. Set traps to call 'cleanup' on Ctrl+C, termination, or normal exit
+trap cleanup SIGINT SIGTERM EXIT
 
 # Create and clear the logs directory
 echo "Creating/clearing ./logs directory..."
@@ -98,12 +112,6 @@ LOGS_PID=$!
 #   This command blocks until $LOGS_PID finishes.
 wait $LOGS_PID
 
-
-# 6. If exit without CTRL+C then combine logs (happens with -runonce flag)
-echo "Combining node logs into ./logs/merged_log.csv..."
-cat ./logs/node_*.csv | grep -v "Timestamp" | sort > ./logs/merged_log.csv
-    
-echo "Cleanup complete."
-
-# 7. Once 'wait' finishes, the logger and the containers have stopped.
+# 6. Once 'wait' finishes, the logger and the containers have stopped.
+cleanup
 echo "Containers finished."
