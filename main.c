@@ -21,7 +21,7 @@
 #define MAX_NODES 10 
 #define BUFFER_SIZE 1024
 #define LOG_FILENAME_FORMAT "/app/logs/node_%d.csv"
-#define SYNC_WINDOW_SECONDS 1      // Time (in sec) for each node's "turn"
+#define SYNC_WINDOW_SECONDS 5      // Time (in sec) for each node's "turn"
 #define PACKET_PAYLOAD_SIZE 256
 
 // --- NETWORK SIMULATION PARAMETERS ---
@@ -562,6 +562,7 @@ int main() {
             RUN_ONCE_FLAG = 0;
         } else if (strcmp(run_once_env, "1") == 0) {
             RUN_ONCE_FLAG = 1;
+        }
     }
     // 1. Get service name
     const char* service_name = getenv("SERVICE_NAME");

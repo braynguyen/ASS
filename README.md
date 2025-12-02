@@ -80,7 +80,12 @@ Run with default 5 nodes:
 
 Run with custom number of nodes (e.g., 8 nodes):
 ```bash
-./run-multi.sh 8
+./run-multi.sh -n 8
+```
+
+Run with custom number of nodes and run only once:
+```bash
+./run-multi.sh -n 8 -runonce
 ```
 
 **Note**: If you change the number of nodes, you must update the visibility matrix in [main.c:34-45](main.c#L34-L45) accordingly.
