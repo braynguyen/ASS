@@ -25,16 +25,16 @@
 
 // --- NETWORK SIMULATION PARAMETERS ---
 #define SIM_MIN_DELAY_MS    10      // Minimum latency per hop
-#define SIM_MAX_DELAY_MS    1000    // Maximum latency per hop (Jitter)
+#define SIM_MAX_DELAY_MS    50      // Maximum latency per hop (Jitter)
 
 // Hard-coded visibility matrix: visibility_matrix[i][j] = 1 means node i can see node j
-static const int visibility_matrix[MAX_NODES][MAX_NODES] = {
-    {0, 1, 0, 0, 0},    // node-0 can see: node-1
-    {0, 0, 1, 0, 0},    // node-1 can see: node-2
-    {0, 0, 0, 1, 0},    // node-2 can see: node-3
-    {0, 0, 0, 0, 1},    // node-3 can see: node-4
-    {0, 0, 0, 0, 0}     // node-4 can see: nobody
-};
+// static const int visibility_matrix[MAX_NODES][MAX_NODES] = {
+//     {0, 1, 0, 0, 0},    // node-0 can see: node-1
+//     {0, 0, 1, 0, 0},    // node-1 can see: node-2
+//     {0, 0, 0, 1, 0},    // node-2 can see: node-3
+//     {0, 0, 0, 0, 1},    // node-3 can see: node-4
+//     {0, 0, 0, 0, 0}     // node-4 can see: nobody
+// };
 
 // =============================================================================
 // --- DATA STRUCTURES ---
@@ -270,15 +270,15 @@ int get_next_node_index(int current_index) {
  */
 void wait_for_turn(int sockfd, sync_state_t *state) {
     const long queue_poll_ns = 10L * 1000L * 1000L; // 10ms polling time
-    int link_node = -1;
+    int link_node = self_index+1; // Default to next node in list
 
     // Get the link node we need to send messages to
-    for (int i = 0; i < node_count; ++i) {
-        if (i == self_index) continue; // Don't send to self
-        if (visibility_matrix[self_index][i] == 0) continue; // Not visible
+    // for (int i = 0; i < node_count; ++i) {
+    //     if (i == self_index) continue; // Don't send to self
+    //     if (visibility_matrix[self_index][i] == 0) continue; // Not visible
 
-        link_node = i;
-    }
+    //     link_node = i;
+    // }
 
     while (1) {
         pthread_mutex_lock(&state->lock);
@@ -517,21 +517,35 @@ void sendMessageToPeers(int sockfd, int self_index, int slotRun, int messageNumb
         return;
     }
 
-    for (int i = 0; i < node_count; ++i) {
-        if (i == self_index) continue; // Don't send to self
-        if (visibility_matrix[self_index][i] == 0) continue; // Not visible
-
-        // Save the link
-        // Not needed but will keep in case we need to revert
-        //link_node = i;
-
-        char log_msg[256];
-        snprintf(log_msg, sizeof(log_msg), "PKT %d->%d (S:%d M:%d) | Originating packet", 
-                 packet.src_index, packet.dst_index, packet.slot_id, packet.msg_id);
-        log_event("SEND", log_msg);
-
-        send_app_packet(sockfd, &packet, i);
+    int link_node = self_index+1; // Default to next node in list
+    if (link_node >= node_count) {
+        // No further nodes to send to
+        // log_event("INFO", "No further nodes to send MSG packet to.");
+        return;
     }
+
+    char log_msg[256];
+    snprintf(log_msg, sizeof(log_msg), "PKT %d->%d (S:%d M:%d) | Originating packet", 
+                packet.src_index, packet.dst_index, packet.slot_id, packet.msg_id);
+    log_event("SEND", log_msg);
+
+    send_app_packet(sockfd, &packet, link_node);
+
+    // for (int i = 0; i < node_count; ++i) {
+    //     if (i == self_index) continue; // Don't send to self
+    //     if (visibility_matrix[self_index][i] == 0) continue; // Not visible
+
+    //     // Save the link
+    //     // Not needed but will keep in case we need to revert
+    //     //link_node = i;
+
+    //     char log_msg[256];
+    //     snprintf(log_msg, sizeof(log_msg), "PKT %d->%d (S:%d M:%d) | Originating packet", 
+    //              packet.src_index, packet.dst_index, packet.slot_id, packet.msg_id);
+    //     log_event("SEND", log_msg);
+
+    //     send_app_packet(sockfd, &packet, i);
+    // }
 }
 
 // =============================================================================
@@ -671,6 +685,9 @@ int main() {
     // Seed the random number generator for latency simulation
     srand(time(NULL) ^ self_ip_numeric);
 
+    // Pre-calculate estimated traversal time for one-way message forwarding
+    int estimated_traversal_time_us = SIM_MAX_DELAY_MS * (node_count-self_index-1) * 1000; // in microseconds
+
     // 10. Main thread becomes the "Sender"
     while (1) {
         wait_for_turn(sockfd, &sync_state);
@@ -705,7 +722,8 @@ int main() {
             sendMessageToPeers(sockfd, self_index, slotRun, messageNumber);
             // Sleep for a short time to avoid flooding
             // In a real app, this might be a complex streaming loop.
-            sleep(2); // Send every 2 seconds
+            // sleep(2); // Send every 2 seconds
+            usleep(estimated_traversal_time_us);
             // ------------------------------------------------------
 
             // Update current time
@@ -718,7 +736,23 @@ int main() {
         }
         // keep track of every time slot has come up
         slotRun++;
+
+        // Finished this node's single turn — exit gracefully
+        log_event("INFO", "Finished send window; exiting.");
+        // Give a short grace period for background logging/network flush
+        sleep(1);
+        break;
     }
+
+    // Stop listener thread
+    pthread_cancel(listener); // Request cancellation (recvfrom() is a cancellation point)
+    pthread_join(listener, NULL);
+
+    // Cleanup
+    fclose(log_file);
+    close(sockfd);
+    pthread_mutex_destroy(&sync_state.lock);
+    pthread_cond_destroy(&sync_state.cond);
 
     return 0;
 }
