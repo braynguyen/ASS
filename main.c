@@ -553,20 +553,15 @@ void sendMessageToPeers(int sockfd, int self_index, int slotRun, int messageNumb
 // --- MAIN EXECUTION ---
 // =============================================================================
 
-int main(int argc, char* argv[]) {
+int main() {
     // 0. Read RUN_ONCE behavior from environment (default: true)
     const char* run_once_env = getenv("RUN_ONCE");
     int RUN_ONCE_FLAG = 0; // default false
     if (run_once_env) {
         if (strcmp(run_once_env, "0") == 0) {
             RUN_ONCE_FLAG = 0;
-        } else if (strcasecmp(run_once_env, "false") == 0 || strcasecmp(run_once_env, "no") == 0) {
-            RUN_ONCE_FLAG = 0;
         } else if (strcmp(run_once_env, "1") == 0) {
             RUN_ONCE_FLAG = 1;
-        } else if (strcasecmp(run_once_env, "true") == 0 || strcasecmp(run_once_env, "yes") == 0) {
-            RUN_ONCE_FLAG = 1;
-        }
     }
     // 1. Get service name
     const char* service_name = getenv("SERVICE_NAME");
@@ -755,12 +750,9 @@ int main(int argc, char* argv[]) {
         // Finished this node's send window — either exit or wait for next window
         log_event("INFO", "Finished send window.");
         if (RUN_ONCE_FLAG) {
-            log_event("INFO", "RUN_ONCE=1 set; exiting.");
             // Give a short grace period for background logging/network flush
             sleep(1);
             break;
-        } else {
-            log_event("INFO", "RUN_ONCE disabled; waiting for next turn.");
         }
     }
 
