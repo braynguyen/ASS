@@ -1,9 +1,13 @@
 services:
   relay-node-0:
-    build: .
+    build:
+      context: .
+      args:
+        RUN_ONCE: "1"
     container_name: relay-node-0
     environment:
       - SERVICE_NAME=relay-node
+      - RUN_ONCE=1
     networks:
       mesh-net:
         ipv4_address: 172.20.0.2
@@ -14,10 +18,14 @@ services:
       - ./logs:/app/logs
 
   relay-node-1:
-    build: .
+    build:
+      context: .
+      args:
+        RUN_ONCE: "1"
     container_name: relay-node-1
     environment:
       - SERVICE_NAME=relay-node
+      - RUN_ONCE=1
     networks:
       mesh-net:
         ipv4_address: 172.20.0.3
@@ -28,10 +36,14 @@ services:
       - ./logs:/app/logs
 
   relay-node-2:
-    build: .
+    build:
+      context: .
+      args:
+        RUN_ONCE: "1"
     container_name: relay-node-2
     environment:
       - SERVICE_NAME=relay-node
+      - RUN_ONCE=1
     networks:
       mesh-net:
         ipv4_address: 172.20.0.4
@@ -42,10 +54,14 @@ services:
       - ./logs:/app/logs
 
   relay-node-3:
-    build: .
+    build:
+      context: .
+      args:
+        RUN_ONCE: "1"
     container_name: relay-node-3
     environment:
       - SERVICE_NAME=relay-node
+      - RUN_ONCE=1
     networks:
       mesh-net:
         ipv4_address: 172.20.0.5
@@ -56,10 +72,14 @@ services:
       - ./logs:/app/logs
 
   relay-node-4:
-    build: .
+    build:
+      context: .
+      args:
+        RUN_ONCE: "1"
     container_name: relay-node-4
     environment:
       - SERVICE_NAME=relay-node
+      - RUN_ONCE=1
     networks:
       mesh-net:
         ipv4_address: 172.20.0.6

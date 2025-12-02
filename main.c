@@ -1,6 +1,7 @@
 #include <stdio.h>      // For printf, perror, FILE, fopen, fprintf, snprintf
 #include <stdlib.h>     // For getenv, exit, qsort
 #include <string.h>     // For strcmp, memset, strncpy
+#include <strings.h>    // For strcasecmp
 #include <ifaddrs.h>    // For getifaddrs, freeifaddrs
 #include <netdb.h>      // For getaddrinfo, freeaddrinfo, struct addrinfo
 #include <unistd.h>     // For sleep
@@ -20,7 +21,7 @@
 #define MAX_NODES 10 
 #define BUFFER_SIZE 1024
 #define LOG_FILENAME_FORMAT "/app/logs/node_%d.csv"
-#define SYNC_WINDOW_SECONDS 5      // Time (in sec) for each node's "turn"
+#define SYNC_WINDOW_SECONDS 1      // Time (in sec) for each node's "turn"
 #define PACKET_PAYLOAD_SIZE 256
 
 // --- NETWORK SIMULATION PARAMETERS ---
@@ -552,7 +553,21 @@ void sendMessageToPeers(int sockfd, int self_index, int slotRun, int messageNumb
 // --- MAIN EXECUTION ---
 // =============================================================================
 
-int main() {
+int main(int argc, char* argv[]) {
+    // 0. Read RUN_ONCE behavior from environment (default: true)
+    const char* run_once_env = getenv("RUN_ONCE");
+    int RUN_ONCE_FLAG = 0; // default false
+    if (run_once_env) {
+        if (strcmp(run_once_env, "0") == 0) {
+            RUN_ONCE_FLAG = 0;
+        } else if (strcasecmp(run_once_env, "false") == 0 || strcasecmp(run_once_env, "no") == 0) {
+            RUN_ONCE_FLAG = 0;
+        } else if (strcmp(run_once_env, "1") == 0) {
+            RUN_ONCE_FLAG = 1;
+        } else if (strcasecmp(run_once_env, "true") == 0 || strcasecmp(run_once_env, "yes") == 0) {
+            RUN_ONCE_FLAG = 1;
+        }
+    }
     // 1. Get service name
     const char* service_name = getenv("SERVICE_NAME");
     if (service_name == NULL) {
@@ -737,11 +752,16 @@ int main() {
         // keep track of every time slot has come up
         slotRun++;
 
-        // Finished this node's single turn — exit gracefully
-        log_event("INFO", "Finished send window; exiting.");
-        // Give a short grace period for background logging/network flush
-        sleep(1);
-        break;
+        // Finished this node's send window — either exit or wait for next window
+        log_event("INFO", "Finished send window.");
+        if (RUN_ONCE_FLAG) {
+            log_event("INFO", "RUN_ONCE=1 set; exiting.");
+            // Give a short grace period for background logging/network flush
+            sleep(1);
+            break;
+        } else {
+            log_event("INFO", "RUN_ONCE disabled; waiting for next turn.");
+        }
     }
 
     // Stop listener thread

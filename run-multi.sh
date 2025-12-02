@@ -1,6 +1,9 @@
 #!/bin/bash
 # This script runs N relay-node containers using Docker Compose.
-# Usage: ./run-multi.sh [num_containers]    (default: 5)
+# Usage:
+#   ./run-multi.sh -n NUM_CONTAINERS [-runonce]
+#     -n NUM_CONTAINERS: number of containers (default: 5)
+#     -runonce: if set, nodes exit after one send window (default: on)
 
 # ----------------------------------------------------------------------------------
 # This script builds and starts NUM_CONTAINERS instances of the `relay-node`
@@ -8,7 +11,46 @@
 # are removed when the relay processes exit normally or when you press Ctrl+C.
 # ----------------------------------------------------------------------------------
 
-NUM_CONTAINERS=${1:-5}
+# Parse flags: -n <num> and optional -runonce
+NUM_CONTAINERS=5
+# Default behavior is to unlimited; unset with no -runonce flag sets to 1
+RUN_ONCE=0
+
+usage() {
+    echo "Usage: $0 -n NUM_CONTAINERS [-runonce]"
+    exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -n)
+            if [[ -n "$2" && "$2" != -* ]]; then
+                NUM_CONTAINERS="$2"
+                shift 2
+            else
+                echo "Error: -n requires a numeric argument"
+                usage
+            fi
+            ;;
+        -runonce)
+            RUN_ONCE=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            echo "Unknown option: $1"
+            usage
+            ;;
+    esac
+done
+
+# Validate NUM_CONTAINERS is a positive integer
+if ! [[ "$NUM_CONTAINERS" =~ ^[0-9]+$ ]] || [ "$NUM_CONTAINERS" -le 0 ]; then
+    echo "Error: NUM_CONTAINERS must be a positive integer"
+    usage
+fi
 
 # 1. Define the cleanup function (called on Ctrl+C)
 cleanup() {
@@ -35,11 +77,12 @@ mkdir -p ./logs
 rm -f ./logs/*.csv
 
 # 3. Generate docker-compose.yml with N containers
-echo "Generating docker-compose.yml for $NUM_CONTAINERS containers..."
-./generate-compose.sh $NUM_CONTAINERS
+echo "Generating docker-compose.yml for $NUM_CONTAINERS containers (RUN_ONCE=$RUN_ONCE)..."
+./generate-compose.sh "$NUM_CONTAINERS" "$RUN_ONCE"
 
 # 4. Build and start all containers
-echo "Building and starting containers..."
+echo "Building and starting containers (RUN_ONCE=$RUN_ONCE)..."
+# Build using args from compose and start containers
 docker compose up -d --build
 
 
@@ -55,5 +98,12 @@ LOGS_PID=$!
 #   This command blocks until $LOGS_PID finishes.
 wait $LOGS_PID
 
-# 6. Once 'wait' finishes, the logger and the containers have stopped.
+
+# 6. If exit without CTRL+C then combine logs (happens with -runonce flag)
+echo "Combining node logs into ./logs/merged_log.csv..."
+cat ./logs/node_*.csv | grep -v "Timestamp" | sort > ./logs/merged_log.csv
+    
+echo "Cleanup complete."
+
+# 7. Once 'wait' finishes, the logger and the containers have stopped.
 echo "Containers finished."

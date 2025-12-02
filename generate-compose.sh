@@ -1,9 +1,10 @@
 #!/bin/bash
 # generate-compose.sh
 # Generates docker-compose.yml with N relay-node services, each with a static IP
-# Usage: ./generate-compose.sh [num_containers]
+# Usage: ./generate-compose.sh [num_containers] [run_once]
 
 NUM_CONTAINERS=${1:-5}
+RUN_ONCE_VAL=${2:-1}
 
 # Places generated document into docker-compose.yml using heredoc
 cat > docker-compose.yml << 'YAML_START'
@@ -16,10 +17,14 @@ for i in $(seq 0 $((NUM_CONTAINERS-1))); do
   IP="172.20.0.$((i+2))"
   cat >> docker-compose.yml << YAML_SERVICE
   relay-node-$i:
-    build: .
+    build:
+      context: .
+      args:
+        RUN_ONCE: "${RUN_ONCE_VAL}"
     container_name: relay-node-$i
     environment:
       - SERVICE_NAME=relay-node
+      - RUN_ONCE=${RUN_ONCE_VAL}
     networks:
       mesh-net:
         ipv4_address: $IP
