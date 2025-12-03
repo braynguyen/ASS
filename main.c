@@ -554,16 +554,15 @@ void sendMessageToPeers(int sockfd, int self_index, int slotRun, int messageNumb
 // =============================================================================
 
 int main() {
-    // 0. Read RUN_ONCE behavior from environment (default: true)
-    const char* run_once_env = getenv("RUN_ONCE");
-    int RUN_ONCE_FLAG = 0; // default false
-    if (run_once_env) {
-        if (strcmp(run_once_env, "0") == 0) {
-            RUN_ONCE_FLAG = 0;
-        } else if (strcmp(run_once_env, "1") == 0) {
-            RUN_ONCE_FLAG = 1;
-        }
+    // 0. Read TOTAL_ROUNDS from environment (number of send windows per node).
+    // If TOTAL_ROUNDS is unset or <=0 the node will run indefinitely.
+    const char *total_runs_env = getenv("TOTAL_ROUNDS");
+    int TOTAL_ROUNDS = -1; // -1 => run indefinitely
+    if (total_runs_env) {
+        int v = atoi(total_runs_env);
+        if (v > 0) TOTAL_ROUNDS = v;
     }
+
     // 1. Get service name
     const char* service_name = getenv("SERVICE_NAME");
     if (service_name == NULL) {
@@ -745,12 +744,14 @@ int main() {
             // keep track of sent message this run 
             messageNumber++;
         }
-        // keep track of every time slot has come up
+        // keep track of every time this node's slot has run
         slotRun++;
 
-        // Finished this node's send window — either exit or wait for next window
+        // Finished this node's send window
         log_event("INFO", "Finished send window.");
-        if (RUN_ONCE_FLAG) {
+
+        // If TOTAL_ROUNDS is set (>0), exit after this node has completed that many windows
+        if (TOTAL_ROUNDS > 0 && slotRun > TOTAL_ROUNDS) {
             // Give a short grace period for background logging/network flush
             sleep(1);
             break;

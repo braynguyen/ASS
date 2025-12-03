@@ -10,9 +10,8 @@ COPY main.c .
 # Compile the C code and create an executable named "main"
 RUN gcc -pthread -o main  main.c
 
-# Allow passing a run-once flag at build time and set default
-ARG RUN_ONCE=true
-ENV RUN_ONCE=${RUN_ONCE}
+# Dockerfile default (used only if compose/runtime doesn't override)
+ENV TOTAL_ROUNDS=1
 
 # Set the default command to run when the container starts
 # This "exec form" runs ./main as PID 1
