@@ -54,15 +54,25 @@ Nodes operate in a round-robin schedule with immediate message relay:
 
 This within-slot forwarding mechanism (from the Oliveira & Almeida paper) enables messages to traverse multiple hops during a single node's transmission window, significantly reducing end-to-end latency compared to waiting for each relay node's individual time slot.
 
-### Message Types
+### Packet Structure & Message Types
 
-1. **SYNC Messages**: `SYNC|<node_id>`
-   - Broadcast at the start of each node's time slot
-   - Used by other nodes to synchronize their turn timers
+Packets are sent as a fixed C struct (app_packet_t) instead of plain text strings. This avoids runtime parsing and makes packet handling deterministic across nodes.
 
-2. **MSG Messages**: `MSG|<src_id>|DST|<dst_id>|<payload>`
-   - Contains source node, destination node, and message payload
-   - Nodes forward messages not addressed to them
+Key fields in app_packet_t:
+- type: PACKET_TYPE_SYNC or PACKET_TYPE_MSG
+- src_index: source node index (int)
+- dst_index: destination node index (int) (-1 for broadcast SYNC)
+- slot_id: the originating slot index (int)
+- msg_id: per-slot message sequence id (int)
+- payload: fixed-size char array for message content
+
+SYNC packets
+- Sent with type = PACKET_TYPE_SYNC, src_index set to sender, dst_index = -1.
+- Used to announce the current slot owner and allow receivers to schedule their next timer.
+
+MSG packets
+- Sent with type = PACKET_TYPE_MSG, src_index set to origin, dst_index to final destination, and payload containing the message bytes.
+- Relays queue and forward the binary struct (no string parsing required).
 
 ## Running the Project
 
@@ -183,25 +193,22 @@ This implementation follows the routing protocol from Oliveira & Almeida's paper
 Queue *buffers[MAX_NODES];  // One queue per source node
 ```
 
-**Forwarding Logic:**
+Forwarding logic (struct-based):
 
-1. **Receiving a message** ([main.c:419-426](main.c#L419-L426)):
-   - When a node receives a MSG packet, it checks the destination
-   - If the destination matches its own ID → process and log as RECV
-   - If destination is different → enqueue in the source node's queue
+1. Receiving a message ([main.c:419-426](main.c#L419-L426)):
+   - The listener receives a binary app_packet_t.
+   - If packet.type == PACKET_TYPE_MSG and packet.dst_index == self_index → log as RECV.
+   - Otherwise, enqueue the received app_packet_t into the buffer for packet.src_index.
 
-2. **Forwarding during sender's slot** ([main.c:270-285](main.c#L270-L285)):
-   - While waiting for its own turn, nodes poll their queues every 10ms
-   - If messages exist in the current sender's queue, **immediately forward them**
-   - This happens during the original sender's time slot, not the relay's slot
+2. Forwarding during sender's slot ([main.c:270-285](main.c#L270-L285)):
+   - While waiting for its own turn, nodes poll the queue for the current anchor slot.
+   - If messages exist in the anchor's queue, dequeue and immediately forward the same app_packet_t to the next hop.
+   - Forwarding uses the struct fields (src_index, dst_index, slot_id, msg_id) unchanged.
 
-3. **Multi-hop example**:
-   - Node-0 sends to Node-4: `MSG|0|DST|4|Hello from node 0!`
-   - Node-1 receives it, enqueues in `buffers[0]` (source node-0's queue)
-   - Within node-0's slot, node-1 polls and forwards to node-2
-   - Node-2 → node-3 → node-4, all within node-0's 5-second window
-
-This per-source queueing and within-slot forwarding enables efficient multi-hop routing as described in the paper.
+3. Multi-hop example:
+   - Node-0 sends MSG with src_index=0, dst_index=4.
+   - Node-1 receives the binary struct, enqueues it in buffers[0], then forwards the app_packet_t within node-0's time slot.
+   - Node-2 → node-3 → node-4 receive and forward similarly, all using the app_packet_t structure.
 
 ### Thread Model
 Each node runs two threads:
