@@ -696,7 +696,7 @@ int main() {
     srand(time(NULL) ^ self_ip_numeric);
 
     // Pre-calculate estimated traversal time for one-way message forwarding
-    int estimated_traversal_time_us = SIM_MAX_DELAY_MS * (node_count-self_index-1) * 1000; // in microseconds
+    int estimated_traversal_time_us = SIM_MAX_DELAY_MS * (node_count-1) * 1000; // in microseconds
 
     // 10. Main thread becomes the "Sender"
     while (1) {
