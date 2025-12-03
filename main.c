@@ -21,7 +21,7 @@
 #define MAX_NODES 10 
 #define BUFFER_SIZE 1024
 #define LOG_FILENAME_FORMAT "/app/logs/node_%d.csv"
-#define SYNC_WINDOW_SECONDS 5      // Time (in sec) for each node's "turn"
+#define SYNC_WINDOW_MS 100      // Time (in sec) for each node's "turn"
 #define PACKET_PAYLOAD_SIZE 256
 
 // --- NETWORK SIMULATION PARAMETERS ---
@@ -94,7 +94,8 @@ FILE *log_file = NULL;
 struct sockaddr_in node_list[MAX_NODES]; // Holds all nodes (sorted)
 int node_count = 0;
 int self_index = -1; // Our unique, sorted ID (0 is "leader")
-thread_safe_queue_t* message_buffers[MAX_NODES]; // Array of queues (one per node)
+int cycle = 1;
+thread_safe_queue_t *message_buffers[MAX_NODES]; // Array of queues (one per node)
 
 // =============================================================================
 // --- FUNCTION PROTOTYPES ---
@@ -118,7 +119,7 @@ void* turn_timer_thread(void* arg);
 void schedule_turn_timer(sync_state_t *state);
 void* listener_thread(void* arg);
 void broadcast_sync_packet(int sockfd, int self_index);
-void sendMessageToPeers(int sockfd, int self_index, int slotRun, int messageNumber);
+void sendMessageToPeers(int sockfd, int self_index, int messageNumber);
 void send_app_packet(int sockfd, app_packet_t *packet, int target_node_index);
 
 // =============================================================================
@@ -308,8 +309,8 @@ void wait_for_turn(int sockfd, sync_state_t *state) {
             // Dequeue all pending packets from the anchor's buffer
             while (dequeue(message_buffers[anchor_index], &packet)) {
                 char log_msg[256];
-                snprintf(log_msg, sizeof(log_msg), "PKT %d->%d (S:%d M:%d) | Forwarding packet", 
-                          packet.src_index, packet.dst_index, packet.slot_id, packet.msg_id);
+                snprintf(log_msg, sizeof(log_msg), "PKT %d->%d (S:%d M:%d) | Forwarding packet on cycle %d", 
+                          packet.src_index, packet.dst_index, packet.slot_id, packet.msg_id, cycle);
                 log_event("FWD", log_msg);
                 send_app_packet(sockfd, &packet, link_node);
             }
@@ -323,7 +324,7 @@ void wait_for_turn(int sockfd, sync_state_t *state) {
  */
 void* turn_timer_thread(void* arg) {
     sync_state_t *state = (sync_state_t *)arg;
-    sleep(SYNC_WINDOW_SECONDS);
+    usleep(SYNC_WINDOW_MS * 1000);
 
     log_event("SYNC", "Timer expired, my turn to send.");
 
@@ -425,7 +426,7 @@ void* listener_thread(void* arg) {
 
             if (schedule_self) {
                 char log_msg[64];
-                snprintf(log_msg, sizeof(log_msg), "Received SYNC from %d. Scheduling timer.", packet->src_index);
+                snprintf(log_msg, sizeof(log_msg), "Received SYNC from %d on cycle %d. Scheduling timer.", cycle, packet->src_index);
                 log_event("SYNC", log_msg);
                 schedule_turn_timer(sync_state);
             }
@@ -435,15 +436,15 @@ void* listener_thread(void* arg) {
             if (packet->dst_index == self_index) {
                 // It's for us!
                 char log_msg[512];
-                snprintf(log_msg, sizeof(log_msg), "PKT %d->%d (S:%d M:%d) | Arrived at destination: %s", 
-                         packet->src_index, packet->dst_index, packet->slot_id, packet->msg_id, packet->payload);
+                snprintf(log_msg, sizeof(log_msg), "PKT %d->%d (S:%d M:%d) | Arrived at destination: %s on cycle %d", 
+                         packet->src_index, packet->dst_index, packet->slot_id, packet->msg_id, packet->payload, cycle);
                 log_event("RECV", log_msg);
             } else {
                 // It's for someone else. Queue it.
                 if (packet->src_index >= 0 && packet->src_index < node_count) {
                     char log_msg[128];
-                    snprintf(log_msg, sizeof(log_msg), "PKT %d->%d (S:%d M:%d) | Queuing for forward", 
-                             packet->src_index, packet->dst_index, packet->slot_id, packet->msg_id);
+                    snprintf(log_msg, sizeof(log_msg), "PKT %d->%d (S:%d M:%d) | Queuing for forward on cycle %d", 
+                             packet->src_index, packet->dst_index, packet->slot_id, packet->msg_id, cycle);
                     log_event("QUE", log_msg);
                     
                     if (message_buffers[packet->src_index]) {
@@ -499,7 +500,7 @@ void broadcast_sync_packet(int sockfd, int self_index) {
 /**
  * @brief Sends a regular "MSG" packet to all other nodes.
  */
-void sendMessageToPeers(int sockfd, int self_index, int slotRun, int messageNumber) {
+void sendMessageToPeers(int sockfd, int self_index, int messageNumber) {
 
     // Since we only have one link, we can save the node
     // Not needed but will keep in case we need to revert
@@ -509,9 +510,9 @@ void sendMessageToPeers(int sockfd, int self_index, int slotRun, int messageNumb
     packet.type = PACKET_TYPE_MSG;
     packet.src_index = self_index;
     packet.dst_index = node_count-1; // For simplicity, send to last node (can be changed)
-    packet.slot_id = slotRun;
+    packet.slot_id = cycle; // should not have any concurrency issues
     packet.msg_id = messageNumber;
-    snprintf(packet.payload, sizeof(packet.payload), "Hello from node %d! Slot #%d message #%d", self_index, slotRun, messageNumber);
+    snprintf(packet.payload, sizeof(packet.payload), "Hello from node %d! Slot #%d message #%d", self_index, cycle, messageNumber);
 
     if (self_index < 0 || self_index >= MAX_NODES) {
         log_event("ERROR", "Invalid self index for visibility matrix.");
@@ -690,8 +691,6 @@ int main() {
     log_event("SYNC", "Waiting for all listeners to be ready...");
     sleep(2);
 
-    int slotRun = 1;
-
     // Seed the random number generator for latency simulation
     srand(time(NULL) ^ self_ip_numeric);
 
@@ -724,12 +723,12 @@ int main() {
         int messageNumber = 1;
 
         // Continue sending MSGs until our window ends. This loop replaces perform_send_window()
-        for (double current_time_sec = start_time_sec; (current_time_sec - start_time_sec) < SYNC_WINDOW_SECONDS; ) {
+        for (double current_time_sec = start_time_sec; (current_time_sec - start_time_sec) < (double) SYNC_WINDOW_MS / 1000; ) {
 
             // --- This is where you would stream data --------------
             // For now, we'll just send one message and then sleep
             // to simulate a non-blocking stream.
-            sendMessageToPeers(sockfd, self_index, slotRun, messageNumber);
+            sendMessageToPeers(sockfd, self_index, messageNumber);
             // Sleep for a short time to avoid flooding
             // In a real app, this might be a complex streaming loop.
             // sleep(2); // Send every 2 seconds
@@ -745,13 +744,13 @@ int main() {
             messageNumber++;
         }
         // keep track of every time this node's slot has run
-        slotRun++;
+        cycle++;
 
         // Finished this node's send window
         log_event("INFO", "Finished send window.");
 
         // If TOTAL_ROUNDS is set (>0), exit after this node has completed that many windows
-        if (TOTAL_ROUNDS > 0 && slotRun > TOTAL_ROUNDS) {
+        if (TOTAL_ROUNDS > 0 && cycle > TOTAL_ROUNDS) {
             // Give a short grace period for background logging/network flush
             sleep(1);
             break;
@@ -761,6 +760,20 @@ int main() {
     // Stop listener thread
     pthread_cancel(listener); // Request cancellation (recvfrom() is a cancellation point)
     pthread_join(listener, NULL);
+
+    // log all remaining messages in queues
+    for (int i = 0; i < MAX_NODES; i++)
+    {
+        if (i == self_index || message_buffers[i] == NULL) continue;
+        app_packet_t packet;
+        // Dequeue all pending packets from the anchor's buffer
+        while (dequeue(message_buffers[i], &packet)) {
+            char log_msg[256];        
+            snprintf(log_msg, sizeof(log_msg), "PKT %d->%d (S:%d M:%d) | Message stuck in queue after exit.", 
+                            packet.src_index, packet.dst_index, packet.slot_id, packet.msg_id);
+                    log_event("QUEWARN", log_msg);
+        }
+    }
 
     // Cleanup
     fclose(log_file);
