@@ -542,6 +542,37 @@ void sendMessageToPeers(int sockfd, int self_index, int messageNumber) {
     send_app_packet(sockfd, &packet, link_node);
 }
 
+int forwardMessageFromQueue(int sockfd, int self_index) {
+    if (self_index < 0 || self_index >= MAX_NODES) {
+        log_event("ERROR", "Invalid self index for visibility matrix.");
+        return 0;
+    }
+
+    int link_node = self_index+1; // Default to next node in list
+    if (link_node >= node_count) {
+        // No further nodes to send to
+        // log_event("INFO", "No further nodes to send MSG packet to.");
+        return 0;
+    }
+
+    // Static round-robin index: persists across calls
+    static int rr_index = 0;
+
+    app_packet_t packet;
+    for (int i = 0; i < node_count; i++) { // Check all queues
+        if (dequeue(message_buffers[rr_index], &packet)) {
+            log_packet_event("FWD", &packet, "Forwarding (Drain)");
+            send_app_packet(sockfd, &packet, link_node);
+            // Advance round-robin index for next call
+            rr_index = (rr_index + 1) % node_count;
+            return 1; // Sent one packet
+        }
+        // No packet in this queue, check next
+        rr_index = (rr_index + 1) % node_count;
+    }
+    return 0; // No packets to send
+}
+
 // =============================================================================
 // --- MAIN EXECUTION ---
 // =============================================================================
@@ -732,7 +763,7 @@ int main() {
                     // ALGO 2: Burst Mode
                     // We assume packets were buffered while waiting for our turn.
                     // We send them back-to-back (limited only by link delay in send_app_packet).
-                    usleep(1000); // Minimal inter-packet processing delay
+                    // usleep(1000); // Minimal inter-packet processing delay
                 }
             } else {
                 // Frame complete. 
@@ -742,21 +773,10 @@ int main() {
                 }
                 else if (ALGORITHM_TYPE == 2) {
                     // Algo 2: Drain Logic (Store-and-Forward)
-                    // We check for queued packets and forward them during our window.
-                    int link_node = self_index + 1;
-                    if (link_node < node_count) {
-                        for (int i = 0; i < node_count; i++) {
-                            if (i == self_index || message_buffers[i] == NULL) continue;
-                            app_packet_t packet;
-                            // Dequeue all pending packets from the anchor's buffer
-                            while (dequeue(message_buffers[i], &packet)) {
-                                log_packet_event("FWD", &packet, "Forwarding (Drain)");
-                                send_app_packet(sockfd, &packet, link_node);
-                            }
-                        }
+                    if (!forwardMessageFromQueue(sockfd, self_index)) {
+                        // No more messages to forward, exit send window
+                        break;
                     }
-                    // Exit send window after draining, wait_for_turn() will sync to next turn
-                    break;
                 }
             }
         }
