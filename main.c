@@ -1,7 +1,6 @@
 #include <stdio.h>      // For printf, perror, FILE, fopen, fprintf, snprintf
 #include <stdlib.h>     // For getenv, exit, qsort
 #include <string.h>     // For strcmp, memset, strncpy
-#include <strings.h>    // For strcasecmp
 #include <ifaddrs.h>    // For getifaddrs, freeifaddrs
 #include <netdb.h>      // For getaddrinfo, freeaddrinfo, struct addrinfo
 #include <unistd.h>     // For sleep
@@ -19,23 +18,36 @@
 
 #define PORT 8080                   // Port for all nodes to listen on
 #define MAX_NODES 10 
-#define BUFFER_SIZE 1024
 #define LOG_FILENAME_FORMAT "/app/logs/node_%d.csv"
-#define SYNC_WINDOW_MS 100      // Time (in sec) for each node's "turn"
-#define PACKET_PAYLOAD_SIZE 256
 
-// --- NETWORK SIMULATION PARAMETERS ---
-#define SIM_MIN_DELAY_MS    10      // Minimum latency per hop
-#define SIM_MAX_DELAY_MS    50      // Maximum latency per hop (Jitter)
+// --- SIMULATION SCALE FACTOR ---
+// Baseline timings are 1000x slower than real-world for easier testing
+// 1 = 1000x scale -> 1ms = 1000ms (1 second)
+// 10 = 100x scale
+// 100 = 10x scale
+#define SCALE_FACTOR 100
 
-// Hard-coded visibility matrix: visibility_matrix[i][j] = 1 means node i can see node j
-// static const int visibility_matrix[MAX_NODES][MAX_NODES] = {
-//     {0, 1, 0, 0, 0},    // node-0 can see: node-1
-//     {0, 0, 1, 0, 0},    // node-1 can see: node-2
-//     {0, 0, 0, 1, 0},    // node-2 can see: node-3
-//     {0, 0, 0, 0, 1},    // node-3 can see: node-4
-//     {0, 0, 0, 0, 0}     // node-4 can see: nobody
-// };
+// --- TDMA TIMING CONSTANTS ---
+// Real World: 20ms slot (Standard Mesh Radio)
+// Simulation: 20000ms slot (20 seconds)
+#define SYNC_WINDOW_MS (20000 / SCALE_FACTOR)
+
+// --- PACKET SIZING ---
+#define PACKET_PAYLOAD_SIZE 1024
+
+// --- SIMULATION SETTINGS (Wi-Fi) ---
+// Real World: 0.5ms to 1.5ms (typical Wi-Fi latency)
+// Simulation: 500ms to 1500ms
+#define SIM_MIN_DELAY_MS    (500 / SCALE_FACTOR)
+#define SIM_MAX_DELAY_MS    (1500 / SCALE_FACTOR)
+
+// --- ALGORITHM SELECTION ---
+// 1 = Paced (Sender waits for propagation)
+// 2 = Burst (Sender dumps queue)
+#define ALGORITHM_TYPE      2
+
+// --- VIDEO SIMULATION METRICS ---
+#define PACKETS_PER_FRAME   3
 
 // =============================================================================
 // --- DATA STRUCTURES ---
@@ -78,6 +90,7 @@ typedef struct {
     int self_index;
     double schedule_anchor_time;   // Absolute time when the anchor node started its slot
     int schedule_anchor_index;     // Node index that owns the slot at schedule_anchor_time
+    int queue_pending;  // Flag (0 or 1)
 } sync_state_t;
 
 // Arguments for the listener thread.
@@ -109,6 +122,7 @@ int dequeue(thread_safe_queue_t* q, app_packet_t *out_packet);
 // Helpers
 int compare_nodes(const void *a, const void *b);
 void log_event(const char *type, const char *message);
+void log_packet_event(const char *type, app_packet_t *pkt, const char *extra);
 int get_self_ip(in_addr_t *ip_numeric);
 int get_node_index_for_addr(struct in_addr *sender_ip);
 int get_next_node_index(int current_index);
@@ -128,7 +142,7 @@ void send_app_packet(int sockfd, app_packet_t *packet, int target_node_index);
 
 // Function to create an empty queue
 thread_safe_queue_t* create_queue() {
-    thread_safe_queue_t* q = (thread_safe_queue_t*)malloc(sizeof(thread_safe_queue_t));    q->front = NULL;
+    thread_safe_queue_t* q = (thread_safe_queue_t*)malloc(sizeof(thread_safe_queue_t));
     q->front = NULL;
     q->rear = NULL;
     pthread_mutex_init(&q->lock, NULL);
@@ -201,7 +215,7 @@ void log_event(const char *type, const char *message) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     double timestamp = (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
-
+    timestamp = timestamp / 1000 * SCALE_FACTOR; // Scale time for simulation
     // 2. Format for console output
     printf("[Node %d] %s: %s\n", self_index, type, message);
     fflush(stdout);
@@ -211,6 +225,19 @@ void log_event(const char *type, const char *message) {
         fprintf(log_file, "%.6f,%d,%s,\"%s\"\n", timestamp, self_index, type, message);
         fflush(log_file);
     }
+}
+
+/**
+ * @brief Logs a packet-related event with packet details.
+ * @param type A short string (e.g., "SEND", "RECV", "FWD", "QUE")
+ * @param pkt Pointer to the app_packet_t structure.
+ * @param extra Additional message details.
+ */
+void log_packet_event(const char *type, app_packet_t *pkt, const char *extra) {
+    char msg[512];
+    snprintf(msg, sizeof(msg), "PKT %d->%d (S:%d M:%d) | %s", 
+             pkt->src_index, pkt->dst_index, pkt->slot_id, pkt->msg_id, extra);
+    log_event(type, msg);
 }
 
 /**
@@ -271,50 +298,38 @@ int get_next_node_index(int current_index) {
  * @brief Blocks the main thread until its turn to send.
  */
 void wait_for_turn(int sockfd, sync_state_t *state) {
-    const long queue_poll_ns = 10L * 1000L * 1000L; // 10ms polling time
-    int link_node = self_index+1; // Default to next node in list
+    // Line Topology: N sends to N+1
+    int link_node = self_index + 1;
+    if (link_node >= node_count) link_node = -1; // End of line
 
-    // Get the link node we need to send messages to
-    // for (int i = 0; i < node_count; ++i) {
-    //     if (i == self_index) continue; // Don't send to self
-    //     if (visibility_matrix[self_index][i] == 0) continue; // Not visible
-
-    //     link_node = i;
-    // }
-
+    pthread_mutex_lock(&state->lock);
     while (1) {
-        pthread_mutex_lock(&state->lock);
         if (state->ready_to_send) {
             state->ready_to_send = 0; // Consume the "turn"
             pthread_mutex_unlock(&state->lock);
             return;
         }
 
-        // Wait specified amount of time
-        struct timespec wake_time;
-        clock_gettime(CLOCK_REALTIME, &wake_time);
-        wake_time.tv_nsec += queue_poll_ns;
-        wake_time.tv_sec += wake_time.tv_nsec / 1000000000L;
-        wake_time.tv_nsec %= 1000000000L;
-        int wait_rc = pthread_cond_timedwait(&state->cond, &state->lock, &wake_time);
-        int anchor_index = state->schedule_anchor_index;
-        pthread_mutex_unlock(&state->lock);
+        if (state->queue_pending) {
+            state->queue_pending = 0;
+            int anchor = state->schedule_anchor_index;
+            pthread_mutex_unlock(&state->lock);
 
-        // Poll the queue at the end of the timeout
-        if (wait_rc == ETIMEDOUT) {
-            // validate anchor_index and corresponding buffer
-            if (anchor_index < 0 || anchor_index >= node_count) continue;
-            if (message_buffers[anchor_index] == NULL) continue;
-            app_packet_t packet;
-            // Dequeue all pending packets from the anchor's buffer
-            while (dequeue(message_buffers[anchor_index], &packet)) {
-                char log_msg[256];
-                snprintf(log_msg, sizeof(log_msg), "PKT %d->%d (S:%d M:%d) | Forwarding packet on cycle %d", 
-                          packet.src_index, packet.dst_index, packet.slot_id, packet.msg_id, cycle);
-                log_event("FWD", log_msg);
-                send_app_packet(sockfd, &packet, link_node);
+            // ALGO 1: Paced/Immediate Forwarding
+            // In Algo 1, we process queues immediately while waiting for our turn (Interrupt driven)
+            if (ALGORITHM_TYPE == 1) {
+                if (link_node != -1 && anchor >= 0 && anchor < MAX_NODES && message_buffers[anchor]) {
+                    app_packet_t packet;
+                    while (dequeue(message_buffers[anchor], &packet)) {
+                        log_packet_event("FWD", &packet, "Forwarding (Interrupt)");
+                        send_app_packet(sockfd, &packet, link_node);
+                    }
+                }
             }
+            pthread_mutex_lock(&state->lock);
+            continue;
         }
+        pthread_cond_wait(&state->cond, &state->lock);
     }
 }
 
@@ -373,7 +388,7 @@ void* listener_thread(void* arg) {
     int sockfd = args->sockfd;
     sync_state_t *sync_state = args->sync_state;
 
-    char recv_buffer[BUFFER_SIZE];
+    char recv_buffer[sizeof(app_packet_t)];
     struct sockaddr_in sender_addr;
     socklen_t addr_len = sizeof(sender_addr);
 
@@ -435,20 +450,18 @@ void* listener_thread(void* arg) {
             // Message Routing Logic
             if (packet->dst_index == self_index) {
                 // It's for us!
-                char log_msg[512];
-                snprintf(log_msg, sizeof(log_msg), "PKT %d->%d (S:%d M:%d) | Arrived at destination: %s on cycle %d", 
-                         packet->src_index, packet->dst_index, packet->slot_id, packet->msg_id, packet->payload, cycle);
-                log_event("RECV", log_msg);
+                log_packet_event("RECV", packet, "Arrived at destination");
             } else {
                 // It's for someone else. Queue it.
                 if (packet->src_index >= 0 && packet->src_index < node_count) {
-                    char log_msg[128];
-                    snprintf(log_msg, sizeof(log_msg), "PKT %d->%d (S:%d M:%d) | Queuing for forward on cycle %d", 
-                             packet->src_index, packet->dst_index, packet->slot_id, packet->msg_id, cycle);
-                    log_event("QUE", log_msg);
-                    
+                    log_packet_event("QUE", packet, "Buffered");
                     if (message_buffers[packet->src_index]) {
                         enqueue(message_buffers[packet->src_index], packet);
+                        // Notify main thread that there's a queued packet to forward
+                        pthread_mutex_lock(&sync_state->lock);
+                        sync_state->queue_pending = 1;
+                        pthread_cond_signal(&sync_state->cond);
+                        pthread_mutex_unlock(&sync_state->lock);
                     }
                 }
             }
@@ -501,11 +514,6 @@ void broadcast_sync_packet(int sockfd, int self_index) {
  * @brief Sends a regular "MSG" packet to all other nodes.
  */
 void sendMessageToPeers(int sockfd, int self_index, int messageNumber) {
-
-    // Since we only have one link, we can save the node
-    // Not needed but will keep in case we need to revert
-    //int link_node;
-    
     app_packet_t packet;
     packet.type = PACKET_TYPE_MSG;
     packet.src_index = self_index;
@@ -532,22 +540,6 @@ void sendMessageToPeers(int sockfd, int self_index, int messageNumber) {
     log_event("SEND", log_msg);
 
     send_app_packet(sockfd, &packet, link_node);
-
-    // for (int i = 0; i < node_count; ++i) {
-    //     if (i == self_index) continue; // Don't send to self
-    //     if (visibility_matrix[self_index][i] == 0) continue; // Not visible
-
-    //     // Save the link
-    //     // Not needed but will keep in case we need to revert
-    //     //link_node = i;
-
-    //     char log_msg[256];
-    //     snprintf(log_msg, sizeof(log_msg), "PKT %d->%d (S:%d M:%d) | Originating packet", 
-    //              packet.src_index, packet.dst_index, packet.slot_id, packet.msg_id);
-    //     log_event("SEND", log_msg);
-
-    //     send_app_packet(sockfd, &packet, i);
-    // }
 }
 
 // =============================================================================
@@ -695,10 +687,12 @@ int main() {
     srand(time(NULL) ^ self_ip_numeric);
 
     // Pre-calculate estimated traversal time for one-way message forwarding
-    int estimated_traversal_time_us = SIM_MAX_DELAY_MS * (node_count-1) * 1000; // in microseconds
+    int forward_hop_count = node_count - 2; // additional hops beyond direct neighbor
+    int estimated_forward_time_us = SIM_MAX_DELAY_MS * forward_hop_count * 1000; // in microseconds
 
     // 10. Main thread becomes the "Sender"
     while (1) {
+        // Wait for our turn OR forward queued packets
         wait_for_turn(sockfd, &sync_state);
 
         // Get the time our window starts
@@ -717,31 +711,54 @@ int main() {
         // It's our turn, begin broadcast with SYNC
         broadcast_sync_packet(sockfd, self_index);
 
-        // For testing only send one message
-        //sendMessageToPeers(sockfd, self_index);
-
         int messageNumber = 1;
 
         // Continue sending MSGs until our window ends. This loop replaces perform_send_window()
-        for (double current_time_sec = start_time_sec; (current_time_sec - start_time_sec) < (double) SYNC_WINDOW_MS / 1000; ) {
+        while(1) {
+            struct timeval now;
+            gettimeofday(&now, NULL);
+            double now_sec = (double)now.tv_sec + (double)now.tv_usec / 1e6;
 
-            // --- This is where you would stream data --------------
-            // For now, we'll just send one message and then sleep
-            // to simulate a non-blocking stream.
-            sendMessageToPeers(sockfd, self_index, messageNumber);
-            // Sleep for a short time to avoid flooding
-            // In a real app, this might be a complex streaming loop.
-            // sleep(2); // Send every 2 seconds
-            usleep(estimated_traversal_time_us);
-            // ------------------------------------------------------
+            if ((now_sec - start_time_sec) >= (double) SYNC_WINDOW_MS / 1000) break;
 
-            // Update current time
-            struct timeval current_time;
-            gettimeofday(&current_time, NULL);
-            current_time_sec = (double)current_time.tv_sec + (double)current_time.tv_usec / 1e6;
-
-            // keep track of sent message this run 
-            messageNumber++;
+            if (messageNumber <= PACKETS_PER_FRAME) {
+                sendMessageToPeers(sockfd, self_index, messageNumber);
+                messageNumber++;
+                // --- SLEEP LOGIC ---
+                if (ALGORITHM_TYPE == 1) {
+                    // ALGO 1: Wait for full network traversal to allow interrupts to clear path
+                    usleep(estimated_forward_time_us); 
+                } else {
+                    // ALGO 2: Burst Mode
+                    // We assume packets were buffered while waiting for our turn.
+                    // We send them back-to-back (limited only by link delay in send_app_packet).
+                    usleep(1000); // Minimal inter-packet processing delay
+                }
+            } else {
+                // Frame complete. 
+                if (ALGORITHM_TYPE == 1) {
+                    // Algo 1: Exit send window after sending all packets, wait_for_turn() will sync to next turn
+                    break;
+                }
+                else if (ALGORITHM_TYPE == 2) {
+                    // Algo 2: Drain Logic (Store-and-Forward)
+                    // We check for queued packets and forward them during our window.
+                    int link_node = self_index + 1;
+                    if (link_node < node_count) {
+                        for (int i = 0; i < node_count; i++) {
+                            if (i == self_index || message_buffers[i] == NULL) continue;
+                            app_packet_t packet;
+                            // Dequeue all pending packets from the anchor's buffer
+                            while (dequeue(message_buffers[i], &packet)) {
+                                log_packet_event("FWD", &packet, "Forwarding (Drain)");
+                                send_app_packet(sockfd, &packet, link_node);
+                            }
+                        }
+                    }
+                    // Exit send window after draining, wait_for_turn() will sync to next turn
+                    break;
+                }
+            }
         }
         // keep track of every time this node's slot has run
         cycle++;
